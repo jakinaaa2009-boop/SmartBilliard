@@ -1,0 +1,52 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #080c0e;
+  --foreground: #f8fafc;
+}
+
+html,
+body {
+  background: #080c0e;
+  color: #f8fafc;
+}
+
+body {
+  min-height: 100vh;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #1f2a2e transparent;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1f2a2e;
+  border-radius: 99px;
+}
+
+.felt-bg {
+  background-color: #080c0e;
+  background-image:
+    radial-gradient(ellipse 80% 50% at 50% -10%, rgba(34, 197, 94, 0.18), transparent 55%),
+    radial-gradient(circle at 20% 80%, rgba(34, 197, 94, 0.06), transparent 30%),
+    radial-gradient(circle at 85% 30%, rgba(255, 255, 255, 0.04), transparent 25%);
+}
+
+.ball-grid {
+  background-image: radial-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+  background-size: 22px 22px;
+}
+
+.eight-ball {
+  background: radial-gradient(circle at 35% 30%, #3a3a3a, #050505 62%);
+  box-shadow: inset -8px -10px 20px rgba(0, 0, 0, 0.6), 0 8px 30px rgba(0, 0, 0, 0.45);
+}

@@ -11,6 +11,7 @@ export default function RegisterPage() {
         <div className="mb-5 text-center">
           <AppLogo href="/" />
           <h1 className="mt-4 text-xl font-semibold">Бүртгүүлэх</h1>
+          <p className="mt-1 text-sm text-muted-foreground">Тоглогчийн бүртгэл</p>
         </div>
         <Suspense>
           <RegisterForm />

@@ -21,6 +21,7 @@ interface PaymentRes {
   };
   session?: { id: string } | null;
   mock?: boolean;
+  test?: boolean;
 }
 
 export default function PaymentPage() {
@@ -91,9 +92,9 @@ export default function PaymentPage() {
             ))}
           </div>
         ) : null}
-        {mock ? (
+        {mock || data.test ? (
           <Button className="mt-5 w-full" onClick={simulate}>
-            Simulate payment success
+            Туршилтаар төлөх
           </Button>
         ) : null}
       </div>

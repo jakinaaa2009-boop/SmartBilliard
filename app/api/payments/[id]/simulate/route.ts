@@ -1,5 +1,6 @@
 import { connectDB } from "@/lib/db/mongoose";
 import { Payment } from "@/models/Payment";
+import { PricingPlan } from "@/models/PricingPlan";
 import { requireUser, httpError } from "@/lib/auth/guards";
 import { fulfillPaidInvoice } from "@/lib/session/engine";
 import { isMockPaymentEnabled, jsonError, jsonOk, toObject } from "@/lib/utils";
@@ -9,14 +10,16 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    if (!isMockPaymentEnabled()) {
-      return jsonError("Mock төлбөр идэвхгүй байна", 403);
-    }
     const user = await requireUser();
     const { id } = await params;
     await connectDB();
     const payment = await Payment.findById(id);
     if (!payment) return jsonError("Төлбөр олдсонгүй", 404);
+    const plan = payment.pricingPlanId ? await PricingPlan.findById(payment.pricingPlanId) : null;
+    const testPlan = (plan?.durationMinutes || 0) <= 1;
+    if (!isMockPaymentEnabled() && !testPlan) {
+      return jsonError("Mock төлбөр идэвхгүй байна", 403);
+    }
     if (String(payment.userId) !== user.id && user.role !== "ADMIN") {
       return jsonError("Эрх хүрэхгүй", 403);
     }

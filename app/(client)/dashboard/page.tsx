@@ -11,6 +11,7 @@ import { StatusBadge } from "@/components/StatusBadge";
 import { formatMNT } from "@/lib/utils";
 import { LoadingSkeleton } from "@/components/ui/skeleton";
 import { QrScanButton } from "@/components/client/QrScanButton";
+import { PricingCard } from "@/components/PricingCard";
 import { Camera } from "lucide-react";
 
 interface SessionRow {
@@ -27,14 +28,28 @@ interface SessionRow {
 export default function DashboardPage() {
   const router = useRouter();
   const [sessions, setSessions] = useState<SessionRow[]>([]);
+  const [plans, setPlans] = useState<{ id: string; name: string; durationMinutes: number; price: number; popular?: boolean }[]>([]);
+  const [selected, setSelected] = useState("");
+  const [deviceId, setDeviceId] = useState("BILLIARD_01");
+  const [paying, setPaying] = useState(false);
   const [loading, setLoading] = useState(true);
   const leftRef = useRef(false);
 
   async function load() {
     if (leftRef.current) return;
     try {
-      const res = await api<{ sessions: SessionRow[] }>("/api/users/me/sessions");
-      if (!leftRef.current) setSessions(res.sessions);
+      const [res, pricing, tables] = await Promise.all([
+        api<{ sessions: SessionRow[] }>("/api/users/me/sessions"),
+        api<{ plans: { id: string; name: string; durationMinutes: number; price: number; popular?: boolean }[] }>("/api/pricing"),
+        api<{ tables: { deviceId?: string; status: string }[] }>("/api/tables").catch(() => ({ tables: [] })),
+      ]);
+      if (leftRef.current) return;
+      setSessions(res.sessions);
+      setPlans(pricing.plans);
+      const minute = pricing.plans.find((plan) => plan.durationMinutes === 1) || pricing.plans[0];
+      if (minute) setSelected((current) => current || minute.id);
+      const ready = tables.tables.find((table) => table.deviceId && table.status !== "MAINTENANCE");
+      if (ready?.deviceId) setDeviceId(ready.deviceId);
     } catch (err) {
       if (leftRef.current) return;
       if (err instanceof ApiError && err.status === 401) {
@@ -65,6 +80,22 @@ export default function DashboardPage() {
     router.replace("/login");
   }
 
+  async function pay() {
+    if (!selected) return;
+    setPaying(true);
+    try {
+      const res = await api<{ payment: { id: string } }>("/api/payments/qpay/create", {
+        method: "POST",
+        body: JSON.stringify({ deviceId, pricingPlanId: selected, type: "SESSION" }),
+      });
+      router.push(`/payment/${res.payment.id}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Алдаа");
+    } finally {
+      setPaying(false);
+    }
+  }
+
   if (loading) return <LoadingSkeleton />;
 
   return (
@@ -84,16 +115,28 @@ export default function DashboardPage() {
           </div>
         </div>
       ) : (
-        <div className="flex flex-col items-center rounded-2xl border border-dashed border-border bg-card px-5 py-10 text-center">
-          <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-primary/15 text-primary">
-            <Camera className="h-8 w-8" />
+        <div className="space-y-3">
+          <div>
+            <h2 className="text-lg font-semibold">Үнэ</h2>
+            <p className="text-sm text-muted-foreground">{deviceId} · туршилтаар 1 минут сонгоорой</p>
           </div>
-          <p className="font-medium">Идэвхтэй тоглолт алга</p>
-          <p className="mt-1 max-w-sm text-sm text-muted-foreground">
-            Ширээний QR кодыг камераар уншуулаад тоглож эхэлнэ үү.
-          </p>
-          <div className="mt-5 w-full max-w-xs">
-            <QrScanButton />
+          {plans.map((plan) => (
+            <PricingCard
+              key={plan.id}
+              {...plan}
+              selected={selected === plan.id}
+              onSelect={() => setSelected(plan.id)}
+            />
+          ))}
+          <Button className="w-full" size="lg" onClick={pay} disabled={paying || !selected}>
+            {paying ? "Үүсгэж байна..." : "Туршилтаар төлөх"}
+          </Button>
+          <div className="flex flex-col items-center rounded-2xl border border-dashed border-border bg-card px-5 py-6 text-center">
+            <Camera className="mb-3 h-6 w-6 text-primary" />
+            <p className="text-sm text-muted-foreground">Эсвэл ширээний QR уншуулна уу.</p>
+            <div className="mt-3 w-full max-w-xs">
+              <QrScanButton />
+            </div>
           </div>
         </div>
       )}

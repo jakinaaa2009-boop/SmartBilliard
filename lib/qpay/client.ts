@@ -6,6 +6,7 @@ interface CreateInvoiceInput {
   amount: number;
   description: string;
   callbackUrl?: string;
+  forceMock?: boolean;
 }
 
 interface QPayInvoice {
@@ -38,7 +39,7 @@ async function qpayToken() {
 }
 
 export async function createQPayInvoice(input: CreateInvoiceInput): Promise<QPayInvoice> {
-  if (isMockPaymentEnabled()) {
+  if (input.forceMock || isMockPaymentEnabled()) {
     const invoiceId = generateId("INV");
     const payUrl = `${appUrl()}/payment/${input.senderInvoiceNo}`;
     const qr_image = await QRCode.toDataURL(payUrl, {

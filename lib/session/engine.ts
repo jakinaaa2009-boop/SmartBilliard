@@ -11,6 +11,7 @@ import { generateId } from "@/lib/utils";
 import { publish } from "@/lib/realtime/sse";
 import { createQPayInvoice } from "@/lib/qpay/client";
 import { appUrl } from "@/lib/utils";
+import { ensureDeviceReady } from "@/lib/session/setup";
 
 export async function tableIsBookable(tableId: string) {
   const table = await Table.findById(tableId);
@@ -34,7 +35,7 @@ export async function createInvoiceForPlan(input: {
 }) {
   const plan = await PricingPlan.findById(input.pricingPlanId);
   if (!plan || !plan.active) throw new Error("Үнийн багц олдсонгүй");
-  const device = await Device.findOne({ deviceId: input.deviceId.toUpperCase() });
+  const device = await ensureDeviceReady(input.deviceId);
   if (!device || !device.tableId) throw new Error("Төхөөрөмж олдсонгүй");
   const table = await Table.findById(device.tableId);
   if (!table) throw new Error("Ширээ олдсонгүй");
@@ -76,6 +77,7 @@ export async function createInvoiceForPlan(input: {
     amount: plan.price,
     description: `${table.name} — ${plan.name}`,
     callbackUrl: `${appUrl()}/api/payments/qpay/callback`,
+    forceMock: plan.durationMinutes <= 1,
   });
 
   payment.qpayInvoiceId = invoice.invoice_id;
@@ -143,9 +145,10 @@ export async function fulfillPaidInvoice(paymentId: string, qpayPaymentId?: stri
 
     table.status = "ACTIVE";
     device.operationalState = "OPENING";
+    device.detectedBallCount = 0;
     await table.save();
     await device.save();
-    await openBoxThenClose(device.deviceId, device.relayOpenDuration);
+    await openBoxThenClose(device.deviceId, 15000);
     device.operationalState = "IN_USE";
     await device.save();
 
@@ -223,12 +226,14 @@ export async function expireActiveSessions() {
   for (const session of due) {
     session.status = "RETURN_REQUIRED";
     session.returnRequiredAt = now;
+    session.returnedBallCount = 0;
     await session.save();
     await Table.findByIdAndUpdate(session.tableId, { status: "RETURN_REQUIRED" });
     await Device.findOneAndUpdate(
       { deviceId: session.deviceId },
-      { operationalState: "RETURN_REQUIRED" }
+      { operationalState: "RETURN_REQUIRED", detectedBallCount: 0 }
     );
+    await queueCommand({ deviceId: session.deviceId, command: "START_BALL_COUNT" });
     publish(`session:${String(session._id)}`, { type: "return_required" });
     publish("admin", { type: "session.return_required", sessionId: String(session._id) });
   }
@@ -236,13 +241,12 @@ export async function expireActiveSessions() {
 
 export async function processBallReturnAlarms() {
   const settings = await getSettings();
-  const sessions = await Session.find({
-    status: "RETURN_REQUIRED",
-    returnRequiredAt: {
-      $lte: new Date(Date.now() - settings.ballReturnAlarmDelaySeconds * 1000),
-    },
-  });
+  const sessions = await Session.find({ status: "RETURN_REQUIRED" });
   for (const session of sessions) {
+    const delaySeconds = session.purchasedMinutes <= 1 ? 20 : settings.ballReturnAlarmDelaySeconds;
+    if (!session.returnRequiredAt || session.returnRequiredAt.getTime() > Date.now() - delaySeconds * 1000) {
+      continue;
+    }
     const device = await Device.findOne({ deviceId: session.deviceId });
     const missing = (device?.expectedBallCount || session.expectedBallCount) - (device?.detectedBallCount || 0);
     if (missing <= 0) {

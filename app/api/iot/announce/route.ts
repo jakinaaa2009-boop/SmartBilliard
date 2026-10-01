@@ -22,6 +22,7 @@ export async function POST(request: NextRequest) {
       ipAddress?: string;
       firmwareVersion?: string;
       boxStatus?: BoxStatus;
+      ballCount?: number;
       action?: string;
       eventType?: number;
       value?: number;
@@ -35,6 +36,7 @@ export async function POST(request: NextRequest) {
       ipAddress: body.ipAddress,
       firmwareVersion: body.firmwareVersion,
       boxStatus: body.boxStatus,
+      ballCount: body.ballCount,
       action: body.action,
       eventType: body.eventType,
       value: body.value,

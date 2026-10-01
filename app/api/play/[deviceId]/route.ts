@@ -5,6 +5,7 @@ import { Session } from "@/models/Session";
 import { User } from "@/models/User";
 import { jsonError, jsonOk } from "@/lib/utils";
 import { asDoc } from "@/lib/db/as-doc";
+import { ensureDeviceReady } from "@/lib/session/setup";
 
 export async function GET(
   _request: Request,
@@ -12,6 +13,7 @@ export async function GET(
 ) {
   const { deviceId } = await params;
   await connectDB();
+  await ensureDeviceReady(deviceId);
   const device = asDoc(await Device.findOne({ deviceId: deviceId.toUpperCase() }).lean());
   if (!device) return jsonError("Төхөөрөмж олдсонгүй", 404);
   const table = asDoc(

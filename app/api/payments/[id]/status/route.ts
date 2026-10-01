@@ -1,5 +1,6 @@
 import { connectDB } from "@/lib/db/mongoose";
 import { Payment } from "@/models/Payment";
+import { PricingPlan } from "@/models/PricingPlan";
 import { Session } from "@/models/Session";
 import { requireUser, httpError } from "@/lib/auth/guards";
 import { checkQPayPayment } from "@/lib/qpay/client";
@@ -28,10 +29,12 @@ export async function GET(
       }
     }
     const fresh = await Payment.findById(id);
+    const plan = fresh?.pricingPlanId ? await PricingPlan.findById(fresh.pricingPlanId) : null;
     const session = fresh?.sessionId ? asDoc(await Session.findById(fresh.sessionId).lean()) : null;
     return jsonOk({
       payment: toObject(fresh),
       session: session ? { ...session, id: String(session._id) } : null,
+      test: (plan?.durationMinutes || 0) <= 1,
     });
   } catch (error) {
     return httpError(error);

@@ -41,9 +41,12 @@ export async function middleware(request: NextRequest) {
 
   const isAdminArea = pathname.startsWith("/admin");
   const isAdminLogin = pathname === "/admin/login";
-  const isClientAuth = ["/login", "/register", "/forgot-password", "/reset-password"].includes(
-    pathname
-  );
+  const isRegister = pathname === "/register";
+  const isClientAuth = ["/login", "/forgot-password", "/reset-password"].includes(pathname);
+
+  if (isRegister) {
+    return NextResponse.next();
+  }
 
   if (isClientAuth && role === "ADMIN") {
     return NextResponse.redirect(new URL("/admin", request.url));

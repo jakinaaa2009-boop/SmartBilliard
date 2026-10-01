@@ -29,7 +29,9 @@ export default async function HomePage() {
                 <Link href="/login">Нэвтрэх</Link>
               </Button>
               <Button asChild>
-                <Link href="/register">Бүртгүүлэх</Link>
+                <Link href="/register" prefetch={false}>
+                  Бүртгүүлэх
+                </Link>
               </Button>
             </>
           )}
@@ -51,7 +53,9 @@ export default async function HomePage() {
                 <Link href="/login">Тоглож эхлэх</Link>
               </Button>
               <Button size="lg" variant="secondary" asChild>
-                <Link href="/register">Шинээр бүртгүүлэх</Link>
+                <Link href="/register" prefetch={false}>
+                  Шинээр бүртгүүлэх
+                </Link>
               </Button>
             </div>
           </div>

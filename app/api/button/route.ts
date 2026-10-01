@@ -22,6 +22,7 @@ export async function POST(request: NextRequest) {
       action: body.action || "button_pressed",
       eventType: body.eventType,
       value: body.value,
+      ballCount: body.action === "ball_detected" ? body.value : undefined,
       firmwareVersion: "button",
     });
     return jsonOk(

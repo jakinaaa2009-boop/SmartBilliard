@@ -116,8 +116,8 @@ export default function SessionPage() {
 
       {s.status === "COMPLETED" ? (
         <div className="mt-8 rounded-2xl border border-primary/30 bg-primary/10 p-8 text-center">
-          <h2 className="text-2xl font-semibold">Бөмбөг бүрэн буцаагдлаа.</h2>
-          <p className="mt-2 text-muted-foreground">Баярлалаа.</p>
+          <h2 className="text-2xl font-semibold">Бүх бөмбөгөө хийсэнд баярлалаа.</h2>
+          <p className="mt-2 text-muted-foreground">Дахин үйлчлүүлнэ үү.</p>
           <Button className="mt-6" onClick={() => router.push("/dashboard")}>
             Нүүр
           </Button>

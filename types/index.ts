@@ -79,6 +79,10 @@ export type AlertStatus = (typeof ALERT_STATUSES)[number];
 export const IOT_COMMANDS = [
   "OPEN_BOX",
   "CLOSE_BOX",
+  "START_BALL_COUNT",
+  "STOP_BALL_COUNT",
+  "TIME_EXPIRED",
+  "RESET_BALL_COUNT",
   "START_ALARM",
   "STOP_ALARM",
   "PING",

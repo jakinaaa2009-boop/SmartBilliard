@@ -23,6 +23,7 @@ export async function announceDevice(input: {
   ipAddress?: string;
   firmwareVersion?: string;
   boxStatus?: BoxStatus;
+  ballCount?: number;
   action?: string;
   eventType?: number;
   value?: number;
@@ -72,9 +73,17 @@ export async function announceDevice(input: {
     });
   }
 
+  const detected =
+    typeof input.ballCount === "number"
+      ? input.ballCount
+      : input.action === "ball_detected" && typeof input.value === "number"
+        ? input.value
+        : undefined;
+
   const updated = await applyHeartbeat({
     deviceId,
     boxStatus,
+    detectedBallCount: detected,
     firmwareVersion: input.firmwareVersion,
     wifiRssi: input.wifiRssi,
     uptime: input.uptime,

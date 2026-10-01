@@ -13,7 +13,7 @@ import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/input";
 import { formatMNT, relativeTime } from "@/lib/utils";
-import { isDeviceLive } from "@/lib/realtime/live-state";
+import { isDeviceLive } from "@/lib/realtime/device-live";
 import { useAdminLive } from "@/lib/use-admin-live";
 import { toast } from "sonner";
 import { LoadingSkeleton } from "@/components/ui/skeleton";

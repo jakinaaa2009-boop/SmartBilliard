@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import type { LiveDevice } from "@/lib/realtime/live-state";
+import type { LiveDevice } from "@/lib/realtime/device-live";
 
 export function useAdminLive() {
   const [devices, setDevices] = useState<LiveDevice[]>([]);

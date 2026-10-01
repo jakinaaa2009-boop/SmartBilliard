@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { StatusBadge } from "@/components/StatusBadge";
 import { formatDuration, relativeTime } from "@/lib/utils";
-import { isDeviceLive } from "@/lib/realtime/live-state";
+import { isDeviceLive } from "@/lib/realtime/device-live";
 import { useAdminLive } from "@/lib/use-admin-live";
 import { toast } from "sonner";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";

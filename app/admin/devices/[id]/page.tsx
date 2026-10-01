@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/StatusBadge";
 import { ConfirmationModal } from "@/components/ConfirmationModal";
 import { formatDuration, relativeTime } from "@/lib/utils";
-import { isDeviceLive } from "@/lib/realtime/live-state";
+import { isDeviceLive } from "@/lib/realtime/device-live";
 import { useAdminLive } from "@/lib/use-admin-live";
 import { toast } from "sonner";
 import { LoadingSkeleton } from "@/components/ui/skeleton";

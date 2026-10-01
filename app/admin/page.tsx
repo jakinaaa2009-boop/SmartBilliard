@@ -10,7 +10,7 @@ import { formatMNT, formatDuration } from "@/lib/utils";
 import { LoadingSkeleton } from "@/components/ui/skeleton";
 import { ErrorState } from "@/components/EmptyState";
 import { cn } from "@/lib/utils";
-import { isDeviceLive } from "@/lib/realtime/live-state";
+import { isDeviceLive } from "@/lib/realtime/device-live";
 import { useAdminLive } from "@/lib/use-admin-live";
 
 interface Dash {

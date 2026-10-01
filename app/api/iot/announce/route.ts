@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { connectDB } from "@/lib/db/mongoose";
 import { announceDevice } from "@/lib/iot/announce";
+import { runSchedulerTick } from "@/lib/jobs/scheduler";
 import { jsonError, jsonOk } from "@/lib/utils";
 import { readJson } from "@/lib/api";
 import type { BoxStatus } from "@/types";
@@ -13,6 +14,7 @@ function bearer(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     await connectDB();
+    await runSchedulerTick();
     const body = await readJson<{
       deviceId?: string;
       device?: string;
@@ -23,6 +25,7 @@ export async function POST(request: NextRequest) {
       firmwareVersion?: string;
       boxStatus?: BoxStatus;
       ballCount?: number;
+      ballCounterActive?: boolean;
       action?: string;
       eventType?: number;
       value?: number;
@@ -37,6 +40,7 @@ export async function POST(request: NextRequest) {
       firmwareVersion: body.firmwareVersion,
       boxStatus: body.boxStatus,
       ballCount: body.ballCount,
+      ballCounterActive: body.ballCounterActive,
       action: body.action,
       eventType: body.eventType,
       value: body.value,

@@ -6,6 +6,7 @@ import { Payment } from "@/models/Payment";
 import { requireUser, httpError } from "@/lib/auth/guards";
 import { jsonError, jsonOk } from "@/lib/utils";
 import { asDoc } from "@/lib/db/as-doc";
+import { runSchedulerTick } from "@/lib/jobs/scheduler";
 
 export async function GET(
   _request: Request,
@@ -15,6 +16,7 @@ export async function GET(
     const user = await requireUser();
     const { id } = await params;
     await connectDB();
+    await runSchedulerTick();
     const session = asDoc(await Session.findById(id).lean());
     if (!session) return jsonError("Сесс олдсонгүй", 404);
     if (String(session.userId) !== user.id && user.role !== "ADMIN") {

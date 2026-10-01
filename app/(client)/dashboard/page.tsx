@@ -11,6 +11,7 @@ import { StatusBadge } from "@/components/StatusBadge";
 import { formatMNT } from "@/lib/utils";
 import { LoadingSkeleton } from "@/components/ui/skeleton";
 import { PricingCard } from "@/components/PricingCard";
+import { BallCounter } from "@/components/BallCounter";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 
 interface SessionRow {
@@ -22,6 +23,8 @@ interface SessionRow {
   createdAt: string;
   table?: { name: string; deviceId?: string };
   deviceId: string;
+  ballCount?: number;
+  expectedBallCount?: number;
 }
 
 export default function DashboardPage() {
@@ -64,7 +67,7 @@ export default function DashboardPage() {
 
   useEffect(() => {
     void load();
-    const t = setInterval(() => void load(), 2000);
+    const t = setInterval(() => void load(), 1000);
     return () => {
       leftRef.current = true;
       clearInterval(t);
@@ -72,6 +75,9 @@ export default function DashboardPage() {
   }, []);
 
   const active = sessions.find((s) => ["ACTIVE", "EXTENDED", "RETURN_REQUIRED", "BALLS_MISSING"].includes(s.status));
+  const returning = active?.status === "RETURN_REQUIRED" || active?.status === "BALLS_MISSING";
+  const expectedBalls = active?.expectedBallCount || 8;
+  const ballCount = !active ? expectedBalls : returning ? active.ballCount || 0 : 0;
 
   async function logout() {
     leftRef.current = true;
@@ -130,14 +136,27 @@ export default function DashboardPage() {
   return (
     <div className="space-y-4">
       {active ? (
-        <div className="rounded-2xl border border-primary/30 bg-primary/10 p-5">
+        <div className={`rounded-2xl border p-5 ${returning ? "border-warning/40 bg-warning/10" : "border-primary/30 bg-primary/10"}`}>
           <p className="text-sm text-muted-foreground">{active.table?.name || active.deviceId}</p>
-          <p className="mt-1 text-sm">Үлдсэн хугацаа</p>
-          <SessionTimer expiresAt={active.expiresAt} size="md" />
+          {returning ? (
+            <>
+              <p className="mt-1 text-sm">Хугацаа дууслаа. Бөмбөгөө тоолж байна.</p>
+              <div className="mt-3">
+                <BallCounter detected={ballCount} expected={expectedBalls} large />
+              </div>
+            </>
+          ) : (
+            <>
+              <p className="mt-1 text-sm">Үлдсэн хугацаа</p>
+              <SessionTimer expiresAt={active.expiresAt} size="md" />
+            </>
+          )}
           <div className="mt-4 flex gap-2">
-            <Button className="flex-1" onClick={() => setExtendOpen(true)}>
-              Цаг сунгах
-            </Button>
+            {returning ? null : (
+              <Button className="flex-1" onClick={() => setExtendOpen(true)}>
+                Цаг сунгах
+              </Button>
+            )}
             <Button variant="secondary" className="flex-1" asChild>
               <Link href={`/session/${active.id}`}>Дэлгэрэнгүй</Link>
             </Button>
@@ -166,11 +185,11 @@ export default function DashboardPage() {
       <div className="grid grid-cols-2 gap-3">
         <div className="rounded-2xl border border-border bg-card p-4">
           <p className="text-xs text-muted-foreground">Төхөөрөмжийн төлөв</p>
-          <p className="mt-2 font-medium">{active ? "Ашиглаж байна" : "Чөлөөтэй"}</p>
+          <p className="mt-2 font-medium">{returning ? "Бөмбөг тоолж байна" : active ? "Ашиглаж байна" : "Чөлөөтэй"}</p>
         </div>
         <div className="rounded-2xl border border-border bg-card p-4">
           <p className="text-xs text-muted-foreground">Бөмбөгний төлөв</p>
-          <p className="mt-2 font-medium">8 / 8</p>
+          <p className="mt-2 font-medium">{ballCount} / {expectedBalls}</p>
         </div>
       </div>
 

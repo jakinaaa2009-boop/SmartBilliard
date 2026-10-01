@@ -16,6 +16,10 @@ export function startScheduler() {
   void tick();
 }
 
+export async function runSchedulerTick() {
+  return tick();
+}
+
 async function tick() {
   if (!getMongoUri()) {
     if (!global.__sbSchedulerMissingUriWarned) {

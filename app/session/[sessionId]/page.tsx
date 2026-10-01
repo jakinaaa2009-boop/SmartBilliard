@@ -132,7 +132,10 @@ export default function SessionPage() {
       {s.status === "RETURN_REQUIRED" || s.status === "BALLS_MISSING" ? (
         <div className={`mt-6 rounded-2xl border p-6 ${missing ? "border-destructive/40 bg-destructive/10" : "border-warning/40 bg-warning/10"}`}>
           <h2 className="text-xl font-semibold">Тоглох хугацаа дууслаа.</h2>
-          <p className="mt-2 text-sm">Бөмбөгөө төхөөрөмжид буцаан хийнэ үү.</p>
+          <p className="mt-2 text-sm">Бөмбөгөө төхөөрөмжид буцаан хийнэ үү. Тоо шууд шинэчлэгдэнэ.</p>
+          <div className="mt-4">
+            <BallCounter detected={data.device?.ballCount ?? 0} expected={data.device?.expectedBallCount ?? s.expectedBallCount} large />
+          </div>
           {missing ? (
             <div className="mt-4">
               <p className="font-medium text-destructive">Бөмбөг бүрэн буцаагдаагүй байна.</p>

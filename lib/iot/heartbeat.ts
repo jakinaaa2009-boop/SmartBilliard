@@ -13,6 +13,8 @@ export async function applyHeartbeat(input: {
   deviceId: string;
   boxStatus?: BoxStatus;
   detectedBallCount?: number;
+  ballCounterActive?: boolean;
+  countEvent?: boolean;
   alarmStatus?: boolean;
   firmwareVersion?: string;
   wifiRssi?: number;
@@ -29,8 +31,20 @@ export async function applyHeartbeat(input: {
   }
   device.lastHeartbeat = new Date();
   if (input.boxStatus) device.boxStatus = input.boxStatus;
-  if (typeof input.detectedBallCount === "number") {
-    device.detectedBallCount = input.detectedBallCount;
+  const openSession = await Session.findOne({
+    deviceId: device.deviceId,
+    status: { $in: ["ACTIVE", "EXTENDED", "RETURN_REQUIRED", "BALLS_MISSING"] },
+  });
+  const playing = openSession?.status === "ACTIVE" || openSession?.status === "EXTENDED";
+  const returning = openSession?.status === "RETURN_REQUIRED" || openSession?.status === "BALLS_MISSING";
+  const liveCount =
+    returning &&
+    typeof input.detectedBallCount === "number" &&
+    (input.ballCounterActive === true || input.countEvent === true);
+  if (playing) {
+    device.detectedBallCount = 0;
+  } else if (liveCount) {
+    device.detectedBallCount = input.detectedBallCount as number;
   }
   if (typeof input.alarmStatus === "boolean") device.alarmStatus = input.alarmStatus;
   if (input.firmwareVersion) device.firmwareVersion = input.firmwareVersion;
@@ -64,8 +78,10 @@ export async function applyHeartbeat(input: {
     });
   }
 
-  if (typeof input.detectedBallCount === "number") {
-    await syncBallReturn(device.deviceId, input.detectedBallCount);
+  if (playing) {
+    await syncBallReturn(device.deviceId, 0);
+  } else if (liveCount) {
+    await syncBallReturn(device.deviceId, input.detectedBallCount as number);
     await completeSessionIfReturned(device.deviceId);
   }
 

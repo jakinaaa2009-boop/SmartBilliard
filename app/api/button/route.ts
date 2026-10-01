@@ -1,12 +1,14 @@
 import { NextRequest } from "next/server";
 import { connectDB } from "@/lib/db/mongoose";
 import { announceDevice } from "@/lib/iot/announce";
+import { runSchedulerTick } from "@/lib/jobs/scheduler";
 import { jsonError, jsonOk } from "@/lib/utils";
 import { readJson } from "@/lib/api";
 
 export async function POST(request: NextRequest) {
   try {
     await connectDB();
+    await runSchedulerTick();
     const body = await readJson<{
       device?: string;
       deviceId?: string;

@@ -24,6 +24,7 @@ export async function announceDevice(input: {
   firmwareVersion?: string;
   boxStatus?: BoxStatus;
   ballCount?: number;
+  ballCounterActive?: boolean;
   action?: string;
   eventType?: number;
   value?: number;
@@ -84,6 +85,8 @@ export async function announceDevice(input: {
     deviceId,
     boxStatus,
     detectedBallCount: detected,
+    ballCounterActive: input.ballCounterActive,
+    countEvent: input.action === "ball_detected",
     firmwareVersion: input.firmwareVersion,
     wifiRssi: input.wifiRssi,
     uptime: input.uptime,

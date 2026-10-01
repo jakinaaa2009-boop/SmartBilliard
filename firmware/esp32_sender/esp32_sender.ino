@@ -39,6 +39,8 @@ String deviceSecret;
 volatile bool doorOpen = false;
 volatile bool ballCounterActive = false;
 volatile uint32_t ballCount = 0;
+volatile uint32_t lastPostedCount = 0;
+volatile bool countDirty = false;
 SemaphoreHandle_t radioMutex;
 QueueHandle_t apiQueue;
 
@@ -79,8 +81,13 @@ void sendRadio(uint8_t command) {
 }
 
 void startBallCounter(bool resetCounter) {
+  if (ballCounterActive) {
+    Serial.printf("[IR] already counting, keep %u\n", (unsigned)ballCount);
+    return;
+  }
   if (resetCounter) ballCount = 0;
   ballCounterActive = true;
+  countDirty = true;
   Serial.printf("[IR] BALL COUNTER STARTED count=%u\n", (unsigned)ballCount);
 }
 
@@ -91,16 +98,16 @@ void stopBallCounter(bool resetCounter) {
   Serial.printf("[IR] BALL COUNTER STOPPED count=%u\n", (unsigned)ballCount);
 }
 
-bool readBeamBlocked() {
-  bool irDetected = false;
-  for (int j = 0; j < 10; j++) {
+bool sampleBeamBlocked() {
+  int lows = 0;
+  for (int j = 0; j < 4; j++) {
     ledcWrite(IR_TX, 128);
-    delayMicroseconds(600);
-    if (digitalRead(IR_RX) == LOW) irDetected = true;
+    delayMicroseconds(400);
+    if (digitalRead(IR_RX) == LOW) lows++;
     ledcWrite(IR_TX, 0);
-    delayMicroseconds(600);
+    delayMicroseconds(250);
   }
-  return irDetected;
+  return lows >= 3;
 }
 
 bool postJson(const String& path, const String& body, String& response, bool auth) {
@@ -108,7 +115,7 @@ bool postJson(const String& path, const String& body, String& response, bool aut
   WiFiClientSecure client;
   client.setInsecure();
   HTTPClient http;
-  http.setTimeout(8000);
+  http.setTimeout(2500);
   if (!http.begin(client, String(API_BASE) + path)) return false;
   http.addHeader("Content-Type", "application/json");
   if (auth && deviceSecret.length()) http.addHeader("Authorization", String("Bearer ") + deviceSecret);
@@ -170,7 +177,7 @@ void enroll() {
   String body = "{";
   body += "\"deviceId\":\"" + String(DEVICE_ID) + "\",";
   body += "\"name\":\"" + String(DEVICE_NAME) + "\",";
-  body += "\"firmwareVersion\":\"1.2.0\",";
+  body += "\"firmwareVersion\":\"1.3.0\",";
   body += "\"uptime\":" + String(millis() / 1000) + ",";
   body += "\"wifiRssi\":" + String(WiFi.RSSI()) + ",";
   body += "\"ipAddress\":\"" + WiFi.localIP().toString() + "\"";
@@ -188,7 +195,7 @@ void heartbeat() {
   String body = "{";
   body += "\"deviceId\":\"" + String(DEVICE_ID) + "\",";
   body += "\"name\":\"" + String(DEVICE_NAME) + "\",";
-  body += "\"firmwareVersion\":\"1.2.0\",";
+  body += "\"firmwareVersion\":\"1.3.0\",";
   body += "\"uptime\":" + String(millis() / 1000) + ",";
   body += "\"wifiRssi\":" + String(WiFi.RSSI()) + ",";
   body += "\"ipAddress\":\"" + WiFi.localIP().toString() + "\",";
@@ -206,10 +213,14 @@ void reportButton() {
   if (postJson("/api/button", body, response, true)) handleApiJson(response);
 }
 
-void reportBall(int count) {
-  String body = "{\"device\":\"" + String(DEVICE_ID) + "\",\"action\":\"ball_detected\",\"eventType\":2,\"value\":" + String(count) + "}";
+void reportLatestCount() {
+  uint32_t count = ballCount;
+  String body = "{\"device\":\"" + String(DEVICE_ID) + "\",\"action\":\"ball_detected\",\"eventType\":2,\"value\":" + String((unsigned)count) + "}";
   String response;
-  postJson("/api/button", body, response, true);
+  if (!postJson("/api/button", body, response, true)) return;
+  if (ballCount == count) countDirty = false;
+  lastPostedCount = count;
+  handleApiJson(response);
 }
 
 void ButtonTask(void* parameter) {
@@ -231,50 +242,53 @@ void ButtonTask(void* parameter) {
 }
 
 void BeamTask(void* parameter) {
-  bool armed = true;
+  bool inBall = false;
   int clearSamples = 0;
-  unsigned long lastBallTime = 0;
+  unsigned long lastCountMs = 0;
   while (true) {
     if (!ballCounterActive) {
       ledcWrite(IR_TX, 0);
-      armed = true;
+      inBall = false;
       clearSamples = 0;
-      vTaskDelay(pdMS_TO_TICKS(20));
+      vTaskDelay(pdMS_TO_TICKS(15));
       continue;
     }
-    bool blocked = readBeamBlocked();
+    bool blocked = sampleBeamBlocked();
     if (blocked) {
       clearSamples = 0;
-      if (armed && millis() - lastBallTime > 70) {
-        lastBallTime = millis();
+      if (!inBall && millis() - lastCountMs >= 12) {
+        inBall = true;
+        lastCountMs = millis();
         ballCount++;
-        armed = false;
+        countDirty = true;
         Serial.printf("[BALL] DETECTED -> %u\n", (unsigned)ballCount);
-        APIEvent event{2, (int)ballCount};
-        xQueueSend(apiQueue, &event, 0);
       }
-    } else if (!armed) {
+    } else if (inBall) {
       clearSamples++;
-      if (clearSamples >= 3) {
-        armed = true;
+      if (clearSamples >= 1) {
+        inBall = false;
         clearSamples = 0;
-        Serial.println("[IR] READY FOR NEXT BALL");
       }
     }
-    vTaskDelay(pdMS_TO_TICKS(5));
+    vTaskDelay(pdMS_TO_TICKS(1));
   }
 }
 
 void APITask(void* parameter) {
   enroll();
   unsigned long lastBeat = 0;
+  unsigned long lastCountPost = 0;
   APIEvent event;
   while (true) {
-    if (xQueueReceive(apiQueue, &event, pdMS_TO_TICKS(300)) == pdTRUE) {
+    if (xQueueReceive(apiQueue, &event, pdMS_TO_TICKS(30)) == pdTRUE) {
       if (event.eventType == 1) reportButton();
-      else if (event.eventType == 2) reportBall(event.value);
     }
-    if (deviceSecret.length() && millis() - lastBeat > 2000) {
+    if (deviceSecret.length() && ballCounterActive && (countDirty || ballCount != lastPostedCount) && millis() - lastCountPost > 60) {
+      reportLatestCount();
+      lastCountPost = millis();
+    }
+    unsigned long beatEvery = ballCounterActive ? 300 : 2000;
+    if (deviceSecret.length() && millis() - lastBeat > beatEvery) {
       heartbeat();
       lastBeat = millis();
     }

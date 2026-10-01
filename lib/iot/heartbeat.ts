@@ -44,7 +44,8 @@ export async function applyHeartbeat(input: {
   if (playing) {
     device.detectedBallCount = 0;
   } else if (liveCount) {
-    device.detectedBallCount = input.detectedBallCount as number;
+    const incoming = input.detectedBallCount as number;
+    device.detectedBallCount = Math.max(device.detectedBallCount || 0, incoming);
   }
   if (typeof input.alarmStatus === "boolean") device.alarmStatus = input.alarmStatus;
   if (input.firmwareVersion) device.firmwareVersion = input.firmwareVersion;
@@ -81,7 +82,7 @@ export async function applyHeartbeat(input: {
   if (playing) {
     await syncBallReturn(device.deviceId, 0);
   } else if (liveCount) {
-    await syncBallReturn(device.deviceId, input.detectedBallCount as number);
+    await syncBallReturn(device.deviceId, device.detectedBallCount);
     await completeSessionIfReturned(device.deviceId);
   }
 

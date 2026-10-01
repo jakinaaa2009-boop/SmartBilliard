@@ -52,7 +52,7 @@ export default function SessionPage() {
 
   useEffect(() => {
     void load();
-    const t = setInterval(() => void load(), 1000);
+    const t = setInterval(() => void load(), 400);
     return () => clearInterval(t);
   }, [params.sessionId]);
 

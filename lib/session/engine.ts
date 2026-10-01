@@ -1,4 +1,5 @@
 import { Device } from "@/models/Device";
+import { DeviceCommand } from "@/models/DeviceCommand";
 import { Table } from "@/models/Table";
 import { Session } from "@/models/Session";
 import { Payment } from "@/models/Payment";
@@ -227,18 +228,28 @@ export async function expireActiveSessions() {
   const due = await Session.find({
     status: { $in: ["ACTIVE", "EXTENDED"] },
     expiresAt: { $lte: now },
-  });
-  for (const session of due) {
-    session.status = "RETURN_REQUIRED";
-    session.returnRequiredAt = now;
-    session.returnedBallCount = 0;
-    await session.save();
+  }).select("_id");
+  for (const row of due) {
+    const session = await Session.findOneAndUpdate(
+      { _id: row._id, status: { $in: ["ACTIVE", "EXTENDED"] } },
+      { status: "RETURN_REQUIRED", returnRequiredAt: now, returnedBallCount: 0 },
+      { new: true }
+    );
+    if (!session) continue;
     await Table.findByIdAndUpdate(session.tableId, { status: "RETURN_REQUIRED" });
     await Device.findOneAndUpdate(
       { deviceId: session.deviceId },
       { operationalState: "RETURN_REQUIRED", detectedBallCount: 0 }
     );
-    await queueCommand({ deviceId: session.deviceId, command: "START_BALL_COUNT" });
+    const alreadyQueued = await DeviceCommand.findOne({
+      deviceId: session.deviceId,
+      command: "START_BALL_COUNT",
+      status: { $in: ["PENDING", "SENT"] },
+      createdAt: { $gte: new Date(Date.now() - 3 * 60 * 1000) },
+    });
+    if (!alreadyQueued) {
+      await queueCommand({ deviceId: session.deviceId, command: "START_BALL_COUNT" });
+    }
     publish(`session:${String(session._id)}`, { type: "return_required" });
     publish("admin", { type: "session.return_required", sessionId: String(session._id) });
   }
@@ -290,8 +301,10 @@ export async function syncBallReturn(deviceId: string, detected: number) {
     status: { $in: ["ACTIVE", "EXTENDED", "RETURN_REQUIRED", "BALLS_MISSING"] },
   });
   if (!session) return;
-  session.returnedBallCount = detected;
-  await session.save();
+  if (detected > (session.returnedBallCount || 0)) {
+    session.returnedBallCount = detected;
+    await session.save();
+  }
   publish(`session:${String(session._id)}`, {
     type: "balls",
     returned: detected,
@@ -317,6 +330,7 @@ export async function completeSessionIfReturned(deviceId: string) {
   device.operationalState = "AVAILABLE";
   device.alarmStatus = false;
   await device.save();
+  await queueCommand({ deviceId, command: "STOP_BALL_COUNT" });
   await queueCommand({ deviceId, command: "STOP_ALARM" });
   await resolveAlerts({ type: "BALL_MISSING", sessionId: String(session._id) });
   await resolveAlerts({ type: "ALARM_ACTIVE", deviceId });

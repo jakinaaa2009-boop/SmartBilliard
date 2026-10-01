@@ -67,7 +67,7 @@ export default function DashboardPage() {
 
   useEffect(() => {
     void load();
-    const t = setInterval(() => void load(), 1000);
+    const t = setInterval(() => void load(), 400);
     return () => {
       leftRef.current = true;
       clearInterval(t);

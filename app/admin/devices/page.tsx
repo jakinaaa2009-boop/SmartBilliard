@@ -7,7 +7,7 @@ import { DataTable } from "@/components/DataTable";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { StatusBadge } from "@/components/StatusBadge";
-import { relativeTime } from "@/lib/utils";
+import { formatDuration, relativeTime } from "@/lib/utils";
 import { toast } from "sonner";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { LoadingSkeleton } from "@/components/ui/skeleton";
@@ -25,6 +25,7 @@ interface DeviceRow {
   boxStatus: string;
   firmwareVersion?: string;
   lastHeartbeat?: string;
+  uptime?: number;
   table?: { name: string; id?: string };
 }
 
@@ -57,6 +58,8 @@ export default function DevicesPage() {
   }
   useEffect(() => {
     void load();
+    const timer = setInterval(() => void load(), 5000);
+    return () => clearInterval(timer);
   }, [filter]);
 
   async function create() {
@@ -80,15 +83,25 @@ export default function DevicesPage() {
         actions={<Button onClick={() => setOpen(true)}>Шинэ төхөөрөмж</Button>}
       />
       <div className="mb-4 flex gap-2">
-        {["all", "online", "offline", "warning"].map((f) => (
+        {[
+          ["all", "Бүгд"],
+          ["online", "Онлайн"],
+          ["offline", "Оффлайн"],
+          ["warning", "Анхааруулга"],
+        ].map(([f, label]) => (
           <Button key={f} size="sm" variant={filter === f ? "default" : "secondary"} onClick={() => setFilter(f)}>
-            {f}
+            {label}
           </Button>
         ))}
       </div>
       {error ? <ErrorState message={error} onRetry={load} /> : null}
       {loading ? <LoadingSkeleton /> : null}
-      {!loading && !devices.length ? <EmptyState title="Төхөөрөмж алга" /> : null}
+      {!loading && !devices.length ? (
+        <EmptyState
+          title="Төхөөрөмж алга"
+          description="ESP32 асахад энд автоматаар гарна. Sender кодыг бичээд цахилгаанд залгана уу."
+        />
+      ) : null}
       {devices.length ? (
         <DataTable
           columns={[
@@ -99,21 +112,27 @@ export default function DevicesPage() {
             { key: "balls", label: "Бөмбөг" },
             { key: "box", label: "Хайрцаг" },
             { key: "fw", label: "Firmware" },
+            { key: "uptime", label: "Ассан хугацаа" },
             { key: "hb", label: "Heartbeat" },
             { key: "actions", label: "" },
           ]}
           rows={devices.map((d) => ({
-            deviceId: d.deviceId,
+            deviceId: (
+              <Link className="text-primary" href={`/admin/devices/${d.id}`}>
+                {d.deviceId}
+              </Link>
+            ),
             table: d.table?.name || "-",
             status: <StatusBadge value={d.status} />,
             ip: d.ipAddress || "-",
             balls: `${d.detectedBallCount}/${d.expectedBallCount}`,
             box: <StatusBadge value={d.boxStatus} />,
             fw: d.firmwareVersion || "-",
+            uptime: d.status === "ONLINE" && d.uptime != null ? formatDuration(d.uptime) : "-",
             hb: d.lastHeartbeat ? relativeTime(d.lastHeartbeat) : "-",
             actions: (
-              <Link className="text-primary text-sm" href={`/admin/tables/${d.table?.id || ""}`}>
-                Нээх
+              <Link className="text-sm text-primary" href={`/admin/devices/${d.id}`}>
+                Дэлгэрэнгүй
               </Link>
             ),
           }))}

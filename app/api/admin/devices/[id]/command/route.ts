@@ -20,7 +20,7 @@ export async function POST(
     const admin = await requireUser(["ADMIN"]);
     const { id } = await params;
     const body = await readJson<{
-      action: "open" | "close" | "alarm-on" | "alarm-off" | "restart" | "simulate";
+      action: "open" | "close" | "door-open" | "door-close" | "alarm-on" | "alarm-off" | "restart" | "simulate";
       reason?: string;
       simulate?: string;
       balls?: number;
@@ -38,11 +38,26 @@ export async function POST(
         targetId: device.deviceId,
         reason: body.reason,
       });
-    } else if (body.action === "close") {
+    } else if (body.action === "close" || body.action === "door-close") {
       await queueCommand({ deviceId: device.deviceId, command: "CLOSE_BOX" });
+      if (body.action === "door-close") {
+        device.boxStatus = "LOCKED";
+        await device.save();
+      }
       await writeAudit({
         adminId: admin.id,
         action: "MANUAL_CLOSE",
+        targetType: "Device",
+        targetId: device.deviceId,
+        reason: body.reason,
+      });
+    } else if (body.action === "door-open") {
+      await queueCommand({ deviceId: device.deviceId, command: "OPEN_BOX" });
+      device.boxStatus = "UNLOCKED";
+      await device.save();
+      await writeAudit({
+        adminId: admin.id,
+        action: "MANUAL_OPEN",
         targetType: "Device",
         targetId: device.deviceId,
         reason: body.reason,

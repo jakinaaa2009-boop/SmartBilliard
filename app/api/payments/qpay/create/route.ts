@@ -13,7 +13,7 @@ export async function POST(request: NextRequest) {
     const parsed = createPaymentSchema.safeParse(body);
     if (!parsed.success) return jsonError(parsed.error.errors[0]?.message || "Буруу өгөгдөл");
     await connectDB();
-    const payment = await createInvoiceForPlan({
+    const result = await createInvoiceForPlan({
       userId: user.id,
       deviceId: parsed.data.deviceId,
       pricingPlanId: parsed.data.pricingPlanId,
@@ -21,7 +21,9 @@ export async function POST(request: NextRequest) {
       sessionId: parsed.data.sessionId,
     });
     return jsonOk({
-      payment: toObject(payment),
+      payment: toObject(result.payment),
+      session: result.session ? toObject(result.session) : null,
+      started: result.started,
       mock: isMockPaymentEnabled(),
     }, 201);
   } catch (error) {

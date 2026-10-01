@@ -10,13 +10,17 @@ export async function POST(request: NextRequest) {
     const user = await requireUser();
     const body = await readJson<{ deviceId: string; pricingPlanId: string }>(request);
     await connectDB();
-    const payment = await createInvoiceForPlan({
+    const result = await createInvoiceForPlan({
       userId: user.id,
       deviceId: body.deviceId,
       pricingPlanId: body.pricingPlanId,
       type: "SESSION",
     });
-    return jsonOk({ payment: toObject(payment) }, 201);
+    return jsonOk({
+      payment: toObject(result.payment),
+      session: result.session ? toObject(result.session) : null,
+      started: result.started,
+    }, 201);
   } catch (error) {
     if (error instanceof Error && !["UNAUTHORIZED", "FORBIDDEN"].includes(error.message)) {
       return jsonError(error.message, 400);

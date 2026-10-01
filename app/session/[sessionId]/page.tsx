@@ -77,11 +77,16 @@ export default function SessionPage() {
   }
 
   async function extend(planId: string) {
-    const res = await api<{ payment: { id: string } }>(`/api/sessions/${params.sessionId}/extend`, {
+    const res = await api<{ payment: { id: string }; started?: boolean }>(`/api/sessions/${params.sessionId}/extend`, {
       method: "POST",
       body: JSON.stringify({ pricingPlanId: planId }),
     });
     setExtendOpen(false);
+    if (res.started) {
+      toast.success("Цаг сунгагдлаа");
+      await load();
+      return;
+    }
     router.push(`/payment/${res.payment.id}`);
   }
 

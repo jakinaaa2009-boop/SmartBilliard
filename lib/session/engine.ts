@@ -84,7 +84,12 @@ export async function createInvoiceForPlan(input: {
   payment.qrImage = invoice.qr_image;
   payment.urls = invoice.urls;
   await payment.save();
-  return payment;
+
+  if (plan.durationMinutes <= 1) {
+    const started = await fulfillPaidInvoice(String(payment._id), "TEST");
+    return { payment: started.payment, session: started.session, started: Boolean(started.session) };
+  }
+  return { payment, session: null, started: false as const };
 }
 
 export async function fulfillPaidInvoice(paymentId: string, qpayPaymentId?: string) {

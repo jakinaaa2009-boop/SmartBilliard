@@ -97,10 +97,15 @@ export default function PlayPage() {
     if (!selected) return;
     setLoading(true);
     try {
-      const res = await api<{ payment: { id: string } }>("/api/payments/qpay/create", {
+      const res = await api<{ payment: { id: string }; started?: boolean }>("/api/payments/qpay/create", {
         method: "POST",
         body: JSON.stringify({ deviceId, pricingPlanId: selected, type: "SESSION" }),
       });
+      if (res.started) {
+        toast.success("Тоглолт эхэллээ");
+        router.replace("/dashboard");
+        return;
+      }
       router.push(`/payment/${res.payment.id}`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Алдаа");

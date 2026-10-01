@@ -11,6 +11,7 @@ import { StatusBadge } from "@/components/StatusBadge";
 import { formatMNT } from "@/lib/utils";
 import { LoadingSkeleton } from "@/components/ui/skeleton";
 import { PricingCard } from "@/components/PricingCard";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 
 interface SessionRow {
   id: string;
@@ -31,6 +32,7 @@ export default function DashboardPage() {
   const [deviceId, setDeviceId] = useState("BILLIARD_01");
   const [paying, setPaying] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [extendOpen, setExtendOpen] = useState(false);
   const leftRef = useRef(false);
 
   async function load() {
@@ -82,10 +84,37 @@ export default function DashboardPage() {
     if (!selected) return;
     setPaying(true);
     try {
-      const res = await api<{ payment: { id: string } }>("/api/payments/qpay/create", {
+      const res = await api<{ payment: { id: string }; started?: boolean }>("/api/payments/qpay/create", {
         method: "POST",
         body: JSON.stringify({ deviceId, pricingPlanId: selected, type: "SESSION" }),
       });
+      if (res.started) {
+        toast.success("Тоглолт эхэллээ");
+        await load();
+        return;
+      }
+      router.push(`/payment/${res.payment.id}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Алдаа");
+    } finally {
+      setPaying(false);
+    }
+  }
+
+  async function extend(planId: string) {
+    if (!active) return;
+    setPaying(true);
+    try {
+      const res = await api<{ payment: { id: string }; started?: boolean }>(`/api/sessions/${active.id}/extend`, {
+        method: "POST",
+        body: JSON.stringify({ pricingPlanId: planId }),
+      });
+      setExtendOpen(false);
+      if (res.started) {
+        toast.success("Цаг сунгагдлаа");
+        await load();
+        return;
+      }
       router.push(`/payment/${res.payment.id}`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Алдаа");
@@ -106,11 +135,11 @@ export default function DashboardPage() {
           <p className="mt-1 text-sm">Үлдсэн хугацаа</p>
           <SessionTimer expiresAt={active.expiresAt} size="md" />
           <div className="mt-4 flex gap-2">
-            <Button asChild className="flex-1">
-              <Link href={`/session/${active.id}`}>Нээх</Link>
+            <Button className="flex-1" onClick={() => setExtendOpen(true)}>
+              Цаг сунгах
             </Button>
             <Button variant="secondary" className="flex-1" asChild>
-              <Link href={`/session/${active.id}`}>Цаг сунгах</Link>
+              <Link href={`/session/${active.id}`}>Дэлгэрэнгүй</Link>
             </Button>
           </div>
         </div>
@@ -169,6 +198,17 @@ export default function DashboardPage() {
       <Button variant="ghost" className="w-full text-muted-foreground" onClick={logout}>
         Гарах
       </Button>
+
+      <Dialog open={extendOpen} onOpenChange={setExtendOpen}>
+        <DialogContent>
+          <DialogTitle>Цаг сунгах</DialogTitle>
+          <div className="mt-4 space-y-3">
+            {plans.map((plan) => (
+              <PricingCard key={plan.id} {...plan} onSelect={() => void extend(plan.id)} />
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

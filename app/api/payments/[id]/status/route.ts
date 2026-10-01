@@ -21,11 +21,16 @@ export async function GET(
     if (String(payment.userId) !== user.id && user.role !== "ADMIN") {
       return jsonError("Эрх хүрэхгүй", 403);
     }
-    if (payment.status === "PENDING" && payment.qpayInvoiceId) {
-      const check = await checkQPayPayment(payment.qpayInvoiceId);
-      if (check.paid) {
-        await fulfillPaidInvoice(String(payment._id), check.payment_id || undefined);
-        await payment.save();
+    const mockInvoice = String(payment.qpayInvoiceId || "").startsWith("INV-");
+    if (payment.status === "PENDING" && payment.qpayInvoiceId && !mockInvoice) {
+      try {
+        const check = await checkQPayPayment(payment.qpayInvoiceId);
+        if (check.paid) {
+          await fulfillPaidInvoice(String(payment._id), check.payment_id || undefined);
+          await payment.save();
+        }
+      } catch {
+        // QPay шалгалт унасан ч нэхэмжлэхийн төлөвийг буцаана.
       }
     }
     const fresh = await Payment.findById(id);

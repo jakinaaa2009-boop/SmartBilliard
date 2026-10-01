@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { api } from "@/lib/client-api";
 import { PaymentQR } from "@/components/PaymentQR";
@@ -29,13 +29,27 @@ export default function PaymentPage() {
   const router = useRouter();
   const [data, setData] = useState<PaymentRes | null>(null);
   const [mock, setMock] = useState(false);
+  const starting = useRef(false);
 
   async function load() {
-    const res = await api<PaymentRes>(`/api/payments/${params.invoiceId}/status`);
-    setData(res);
-    if (res.payment.status === "PAID" && res.session?.id) {
-      toast.success("Төлбөр амжилттай.");
-      router.replace(`/session/${res.session.id}?paid=1`);
+    try {
+      const res = await api<PaymentRes>(`/api/payments/${params.invoiceId}/status`);
+      if (res.test && res.payment.status === "PENDING") {
+        if (starting.current) return;
+        starting.current = true;
+        await api<PaymentRes>(`/api/payments/${params.invoiceId}/simulate`, { method: "POST" });
+        toast.success("Тоглолт эхэллээ");
+        router.replace("/dashboard");
+        return;
+      }
+      setData(res);
+      if (res.payment.status === "PAID" && res.session?.id) {
+        toast.success("Төлбөр амжилттай.");
+        router.replace("/dashboard");
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Төлбөр ачаалсангүй");
+      router.replace("/dashboard");
     }
   }
 

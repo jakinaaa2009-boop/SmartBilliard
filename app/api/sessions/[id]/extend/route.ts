@@ -18,14 +18,18 @@ export async function POST(
     const session = await Session.findById(id);
     if (!session) return jsonError("Сесс олдсонгүй", 404);
     if (String(session.userId) !== user.id) return jsonError("Эрх хүрэхгүй", 403);
-    const payment = await createInvoiceForPlan({
+    const result = await createInvoiceForPlan({
       userId: user.id,
       deviceId: session.deviceId,
       pricingPlanId: body.pricingPlanId,
       type: "EXTENSION",
       sessionId: String(session._id),
     });
-    return jsonOk({ payment: toObject(payment) }, 201);
+    return jsonOk({
+      payment: toObject(result.payment),
+      session: result.session ? toObject(result.session) : null,
+      started: result.started,
+    }, 201);
   } catch (error) {
     if (error instanceof Error && !["UNAUTHORIZED", "FORBIDDEN"].includes(error.message)) {
       return jsonError(error.message, 400);

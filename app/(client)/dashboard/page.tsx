@@ -10,9 +10,7 @@ import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/StatusBadge";
 import { formatMNT } from "@/lib/utils";
 import { LoadingSkeleton } from "@/components/ui/skeleton";
-import { QrScanButton } from "@/components/client/QrScanButton";
 import { PricingCard } from "@/components/PricingCard";
-import { Camera } from "lucide-react";
 
 interface SessionRow {
   id: string;
@@ -46,8 +44,8 @@ export default function DashboardPage() {
       if (leftRef.current) return;
       setSessions(res.sessions);
       setPlans(pricing.plans);
-      const minute = pricing.plans.find((plan) => plan.durationMinutes === 1) || pricing.plans[0];
-      if (minute) setSelected((current) => current || minute.id);
+      const preferred = pricing.plans.find((plan) => plan.popular) || pricing.plans[0];
+      if (preferred) setSelected((current) => current || preferred.id);
       const ready = tables.tables.find((table) => table.deviceId && table.status !== "MAINTENANCE");
       if (ready?.deviceId) setDeviceId(ready.deviceId);
     } catch (err) {
@@ -96,6 +94,8 @@ export default function DashboardPage() {
     }
   }
 
+  const selectedPlan = plans.find((plan) => plan.id === selected);
+
   if (loading) return <LoadingSkeleton />;
 
   return (
@@ -117,8 +117,8 @@ export default function DashboardPage() {
       ) : (
         <div className="space-y-3">
           <div>
-            <h2 className="text-lg font-semibold">Үнэ</h2>
-            <p className="text-sm text-muted-foreground">{deviceId} · туршилтаар 1 минут сонгоорой</p>
+            <h2 className="text-lg font-semibold">Цагаа сонгоно уу</h2>
+            <p className="text-sm text-muted-foreground">1 минутын багц туршилтын төлбөр. Бусад нь бодит үнэ.</p>
           </div>
           {plans.map((plan) => (
             <PricingCard
@@ -129,15 +129,8 @@ export default function DashboardPage() {
             />
           ))}
           <Button className="w-full" size="lg" onClick={pay} disabled={paying || !selected}>
-            {paying ? "Үүсгэж байна..." : "Туршилтаар төлөх"}
+            {paying ? "Үүсгэж байна..." : (selectedPlan?.durationMinutes || 0) <= 1 ? "Туршилтаар төлөх" : "Төлөх"}
           </Button>
-          <div className="flex flex-col items-center rounded-2xl border border-dashed border-border bg-card px-5 py-6 text-center">
-            <Camera className="mb-3 h-6 w-6 text-primary" />
-            <p className="text-sm text-muted-foreground">Эсвэл ширээний QR уншуулна уу.</p>
-            <div className="mt-3 w-full max-w-xs">
-              <QrScanButton />
-            </div>
-          </div>
         </div>
       )}
 

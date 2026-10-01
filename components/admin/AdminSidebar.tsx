@@ -5,7 +5,6 @@ import { usePathname, useRouter } from "next/navigation";
 import {
   LayoutDashboard,
   Cpu,
-  Table2,
   Users,
   Timer,
   CreditCard,
@@ -22,8 +21,7 @@ import { toast } from "sonner";
 
 const items = [
   { href: "/admin", label: "Хяналтын самбар", icon: LayoutDashboard },
-  { href: "/admin/devices", label: "Төхөөрөмжүүд", icon: Cpu },
-  { href: "/admin/tables", label: "Ширээнүүд", icon: Table2 },
+  { href: "/admin/devices", label: "Төхөөрөмж", icon: Cpu },
   { href: "/admin/users", label: "Хэрэглэгчид", icon: Users },
   { href: "/admin/sessions", label: "Сессиуд", icon: Timer },
   { href: "/admin/payments", label: "Төлбөрүүд", icon: CreditCard },

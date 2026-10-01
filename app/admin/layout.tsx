@@ -9,8 +9,7 @@ import { usePathname } from "next/navigation";
 
 const mobileItems = [
   ["/admin", "Хяналтын самбар"],
-  ["/admin/devices", "Төхөөрөмжүүд"],
-  ["/admin/tables", "Ширээнүүд"],
+  ["/admin/devices", "Төхөөрөмж"],
   ["/admin/users", "Хэрэглэгчид"],
   ["/admin/sessions", "Сессиуд"],
   ["/admin/payments", "Төлбөрүүд"],

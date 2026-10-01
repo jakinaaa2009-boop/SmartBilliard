@@ -2,7 +2,7 @@ import Link from "next/link";
 import { AppLogo } from "@/components/AppLogo";
 import { Button } from "@/components/ui/button";
 import { getAuthUser } from "@/lib/auth/guards";
-import { QrCode, Timer, ShieldCheck, Smartphone } from "lucide-react";
+import { Clock3, Timer, ShieldCheck, Smartphone } from "lucide-react";
 
 export default async function HomePage() {
   const user = await getAuthUser();
@@ -43,10 +43,10 @@ export default async function HomePage() {
           <div>
             <p className="mb-3 text-sm font-medium text-primary">Smart Billiard</p>
             <h1 className="max-w-xl text-4xl font-semibold leading-tight tracking-tight md:text-6xl">
-              QR уншуулаад тоглоорой.
+              Цагаар тоглоорой.
             </h1>
             <p className="mt-4 max-w-lg text-base text-muted-foreground md:text-lg">
-              Ширээний QR кодыг уншуулж, цагаа сонгоод QPay-ээр төлнө үү. Төлбөр амжилттай болсны дараа хайрцаг автоматаар нээгдэнэ.
+              Нэвтэрч цагаа сонгоод төлнө үү. Төлбөр амжилттай болсны дараа хаалга автоматаар нээгдэнэ.
             </p>
             <div className="mt-8 flex flex-col gap-3 sm:flex-row">
               <Button size="lg" asChild>
@@ -89,8 +89,8 @@ export default async function HomePage() {
 
         <section className="grid gap-4 md:grid-cols-3">
           {[
-            { icon: QrCode, title: "QR уншуулах", text: "Ширээний кодыг уншуулаад шууд нэвтэрнэ." },
-            { icon: Smartphone, title: "QPay төлбөр", text: "Банкны апп-аар QR уншуулж төлнө." },
+            { icon: Clock3, title: "Цаг сонгох", text: "1 минут, 30 минут, 1 цаг, 2 цагаас сонгоно." },
+            { icon: Smartphone, title: "Төлбөр", text: "Сонгосон цагаа утаснаасаа төлнө." },
             { icon: Timer, title: "Цаг сунгах", text: "Тоглолтын дунд утсаараа хугацаа нэмнэ." },
           ].map((item) => (
             <div key={item.title} className="rounded-2xl border border-border bg-card p-5">

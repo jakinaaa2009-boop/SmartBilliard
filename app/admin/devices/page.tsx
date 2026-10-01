@@ -87,9 +87,8 @@ export default function DevicesPage() {
   return (
     <div>
       <PageHeader
-        title="Төхөөрөмжүүд"
-        description={connected ? "Шууд холбогдсон" : "Холболт сэргээгдэж байна"}
-        actions={<Button onClick={() => setOpen(true)}>Шинэ төхөөрөмж</Button>}
+        title="Төхөөрөмж"
+        description={connected ? "Нэг төхөөрөмж · шууд холбогдсон" : "Нэг төхөөрөмж"}
       />
       <div className="mb-4 flex gap-2">
         {[

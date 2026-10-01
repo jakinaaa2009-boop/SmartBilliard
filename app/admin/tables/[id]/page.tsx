@@ -13,6 +13,8 @@ import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/input";
 import { formatMNT, relativeTime } from "@/lib/utils";
+import { isDeviceLive } from "@/lib/realtime/live-state";
+import { useAdminLive } from "@/lib/use-admin-live";
 import { toast } from "sonner";
 import { LoadingSkeleton } from "@/components/ui/skeleton";
 import { ErrorState } from "@/components/EmptyState";
@@ -53,6 +55,8 @@ export default function TableDetailPage() {
   const [reason, setReason] = useState("");
   const [minutes, setMinutes] = useState(10);
   const [confirm, setConfirm] = useState<null | "open" | "close" | "alarm-on" | "alarm-off" | "restart">(null);
+  const [now, setNow] = useState(Date.now());
+  const { byDeviceId } = useAdminLive();
 
   async function load() {
     try {
@@ -67,8 +71,12 @@ export default function TableDetailPage() {
     void fetch("/api/public/config")
       .then((r) => r.json())
       .then((d) => setMock(Boolean(d.mockIot)));
-    const t = setInterval(() => void load(), 4000);
-    return () => clearInterval(t);
+    const t = setInterval(() => void load(), 2000);
+    const tick = setInterval(() => setNow(Date.now()), 1000);
+    return () => {
+      clearInterval(t);
+      clearInterval(tick);
+    };
   }, [params.id]);
 
   async function command(action: string, extra?: Record<string, unknown>) {
@@ -83,7 +91,25 @@ export default function TableDetailPage() {
 
   if (error) return <ErrorState message={error} onRetry={load} />;
   if (!data) return <LoadingSkeleton rows={6} />;
-  const d = data.device;
+  const live = data.device ? byDeviceId.get(data.device.deviceId) : undefined;
+  const d = data.device
+    ? {
+        ...data.device,
+        ...(live
+          ? {
+              status: isDeviceLive(live.lastHeartbeat, now) ? "ONLINE" : live.status,
+              boxStatus: live.boxStatus,
+              lastHeartbeat: live.lastHeartbeat,
+              wifiRssi: live.wifiRssi,
+              uptime: live.uptime,
+              detectedBallCount: live.detectedBallCount,
+              expectedBallCount: live.expectedBallCount,
+              alarmStatus: live.alarmStatus,
+              ipAddress: live.ipAddress ?? data.device.ipAddress,
+            }
+          : {}),
+      }
+    : null;
   const s = data.session;
 
   return (

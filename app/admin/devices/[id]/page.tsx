@@ -9,6 +9,8 @@ import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/StatusBadge";
 import { ConfirmationModal } from "@/components/ConfirmationModal";
 import { formatDuration, relativeTime } from "@/lib/utils";
+import { isDeviceLive } from "@/lib/realtime/live-state";
+import { useAdminLive } from "@/lib/use-admin-live";
 import { toast } from "sonner";
 import { LoadingSkeleton } from "@/components/ui/skeleton";
 import { ErrorState } from "@/components/EmptyState";
@@ -45,6 +47,7 @@ export default function DeviceDetailPage() {
   const [confirm, setConfirm] = useState<null | "door-open" | "door-close" | "secret">(null);
   const [secret, setSecret] = useState("");
   const [now, setNow] = useState(Date.now());
+  const { byDeviceId, connected } = useAdminLive();
 
   async function load() {
     try {
@@ -57,7 +60,7 @@ export default function DeviceDetailPage() {
 
   useEffect(() => {
     void load();
-    const poll = setInterval(() => void load(), 4000);
+    const poll = setInterval(() => void load(), 2000);
     const tick = setInterval(() => setNow(Date.now()), 1000);
     return () => {
       clearInterval(poll);
@@ -83,16 +86,37 @@ export default function DeviceDetailPage() {
   if (error) return <ErrorState message={error} onRetry={load} />;
   if (!data) return <LoadingSkeleton rows={6} />;
 
-  const d = data.device;
-  const online = d.status === "ONLINE";
+  const live = byDeviceId.get(data.device.deviceId);
+  const d = live
+    ? {
+        ...data.device,
+        status: live.status,
+        boxStatus: live.boxStatus,
+        operationalState: live.operationalState,
+        lastHeartbeat: live.lastHeartbeat,
+        uptime: live.uptime,
+        ipAddress: live.ipAddress,
+        wifiRssi: live.wifiRssi,
+      }
+    : data.device;
+  const online = isDeviceLive(d.lastHeartbeat, now);
   const uptime = liveUptime(d.uptime, d.lastHeartbeat, online, now);
 
   return (
     <div>
       <PageHeader
         title={d.name || d.deviceId}
-        description={d.deviceId}
-        actions={<StatusBadge value={d.status} />}
+        description={connected ? `${d.deviceId} · шууд` : d.deviceId}
+        actions={
+          online ? (
+            <span className="inline-flex items-center gap-1.5 text-sm font-medium text-primary">
+              <span className="h-2 w-2 rounded-full bg-primary animate-pulseDot" />
+              Идэвхтэй
+            </span>
+          ) : (
+            <StatusBadge value={d.status} />
+          )
+        }
       />
       <Link href="/admin/devices" className="mb-4 inline-block text-sm text-muted-foreground hover:text-foreground">
         Төхөөрөмжүүд рүү буцах

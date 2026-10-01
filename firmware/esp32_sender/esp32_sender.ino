@@ -194,10 +194,10 @@ void APITask(void* parameter) {
   unsigned long lastBeat = 0;
   APIEvent event;
   while (true) {
-    if (xQueueReceive(apiQueue, &event, pdMS_TO_TICKS(2000)) == pdTRUE) {
+    if (xQueueReceive(apiQueue, &event, pdMS_TO_TICKS(250)) == pdTRUE) {
       reportButton();
     }
-    if (deviceSecret.length() && millis() - lastBeat > 3000) {
+    if (deviceSecret.length() && millis() - lastBeat > 1000) {
       heartbeat();
       lastBeat = millis();
     }

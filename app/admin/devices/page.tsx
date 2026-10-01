@@ -8,6 +8,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { StatusBadge } from "@/components/StatusBadge";
 import { formatDuration, relativeTime } from "@/lib/utils";
+import { isDeviceLive } from "@/lib/realtime/live-state";
+import { useAdminLive } from "@/lib/use-admin-live";
 import { toast } from "sonner";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { LoadingSkeleton } from "@/components/ui/skeleton";
@@ -43,6 +45,8 @@ export default function DevicesPage() {
   });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [now, setNow] = useState(Date.now());
+  const { byDeviceId, connected } = useAdminLive();
 
   async function load() {
     try {
@@ -58,8 +62,12 @@ export default function DevicesPage() {
   }
   useEffect(() => {
     void load();
-    const timer = setInterval(() => void load(), 5000);
-    return () => clearInterval(timer);
+    const timer = setInterval(() => void load(), 8000);
+    const tick = setInterval(() => setNow(Date.now()), 1000);
+    return () => {
+      clearInterval(timer);
+      clearInterval(tick);
+    };
   }, [filter]);
 
   async function create() {
@@ -80,6 +88,7 @@ export default function DevicesPage() {
     <div>
       <PageHeader
         title="Төхөөрөмжүүд"
+        description={connected ? "Шууд холбогдсон" : "Холболт сэргээгдэж байна"}
         actions={<Button onClick={() => setOpen(true)}>Шинэ төхөөрөмж</Button>}
       />
       <div className="mb-4 flex gap-2">
@@ -116,26 +125,38 @@ export default function DevicesPage() {
             { key: "hb", label: "Heartbeat" },
             { key: "actions", label: "" },
           ]}
-          rows={devices.map((d) => ({
+          rows={devices.map((d) => {
+            const live = byDeviceId.get(d.deviceId);
+            const row = live ? { ...d, ...live, table: d.table } : d;
+            const active = isDeviceLive(row.lastHeartbeat, now);
+            return {
             deviceId: (
-              <Link className="text-primary" href={`/admin/devices/${d.id}`}>
-                {d.deviceId}
+              <Link className="text-primary" href={`/admin/devices/${row.id}`}>
+                {row.deviceId}
               </Link>
             ),
-            table: d.table?.name || "-",
-            status: <StatusBadge value={d.status} />,
-            ip: d.ipAddress || "-",
-            balls: `${d.detectedBallCount}/${d.expectedBallCount}`,
-            box: <StatusBadge value={d.boxStatus} />,
-            fw: d.firmwareVersion || "-",
-            uptime: d.status === "ONLINE" && d.uptime != null ? formatDuration(d.uptime) : "-",
-            hb: d.lastHeartbeat ? relativeTime(d.lastHeartbeat) : "-",
+            table: row.table?.name || "-",
+            status: active ? (
+              <span className="inline-flex items-center gap-1.5 text-xs font-medium text-primary">
+                <span className="h-2 w-2 rounded-full bg-primary animate-pulseDot" />
+                Идэвхтэй
+              </span>
+            ) : (
+              <StatusBadge value={row.status} />
+            ),
+            ip: row.ipAddress || "-",
+            balls: `${row.detectedBallCount}/${row.expectedBallCount}`,
+            box: <StatusBadge value={row.boxStatus} />,
+            fw: row.firmwareVersion || "-",
+            uptime: active && row.uptime != null ? formatDuration(row.uptime + Math.max(0, (now - new Date(row.lastHeartbeat || now).getTime()) / 1000)) : "-",
+            hb: row.lastHeartbeat ? relativeTime(row.lastHeartbeat) : "-",
             actions: (
-              <Link className="text-sm text-primary" href={`/admin/devices/${d.id}`}>
+              <Link className="text-sm text-primary" href={`/admin/devices/${row.id}`}>
                 Дэлгэрэнгүй
               </Link>
             ),
-          }))}
+          };
+          })}
         />
       ) : null}
 

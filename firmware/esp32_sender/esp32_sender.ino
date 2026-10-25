@@ -111,18 +111,34 @@ bool sampleBeamBlocked() {
 }
 
 bool postJson(const String& path, const String& body, String& response, bool auth) {
-  if (WiFi.status() != WL_CONNECTED) return false;
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[API] Wi-Fi offline");
+    return false;
+  }
   WiFiClientSecure client;
   client.setInsecure();
+  client.setHandshakeTimeout(20000);
+  client.setTimeout(20000);
   HTTPClient http;
-  http.setTimeout(2500);
-  if (!http.begin(client, String(API_BASE) + path)) return false;
+  http.setReuse(false);
+  http.setConnectTimeout(20000);
+  http.setTimeout(20000);
+  String url = String(API_BASE) + path;
+  if (!http.begin(client, url)) {
+    Serial.println("[API] begin failed");
+    return false;
+  }
   http.addHeader("Content-Type", "application/json");
+  http.addHeader("Connection", "close");
   if (auth && deviceSecret.length()) http.addHeader("Authorization", String("Bearer ") + deviceSecret);
-  int code = http.POST(body);
+  int code = http.POST((uint8_t*)body.c_str(), body.length());
   response = http.getString();
+  if (code < 0) {
+    Serial.printf("[API] POST %s -> %d (%s) heap=%u\n", path.c_str(), code, http.errorToString(code).c_str(), ESP.getFreeHeap());
+  } else {
+    Serial.printf("[API] POST %s -> %d\n", path.c_str(), code);
+  }
   http.end();
-  Serial.printf("[API] POST %s -> %d\n", path.c_str(), code);
   if (code == 401) Serial.println("[API] Unauthorized");
   return code >= 200 && code < 300;
 }
@@ -185,9 +201,11 @@ void enroll() {
   String response;
   if (postJson("/api/iot/announce", body, response, false)) {
     handleApiJson(response);
-    Serial.println("[AUTH] Enrolled");
+    if (deviceSecret.length()) Serial.println("[AUTH] Enrolled");
+    else Serial.println("[AUTH] Enrollment failed: no secret in response");
   } else {
-    Serial.println(response);
+    Serial.println("[AUTH] Enrollment failed");
+    if (response.length()) Serial.println(response);
   }
 }
 
@@ -275,11 +293,15 @@ void BeamTask(void* parameter) {
 }
 
 void APITask(void* parameter) {
-  enroll();
   unsigned long lastBeat = 0;
+  unsigned long lastEnroll = 0;
   unsigned long lastCountPost = 0;
   APIEvent event;
   while (true) {
+    if (!deviceSecret.length() && millis() - lastEnroll > 8000) {
+      lastEnroll = millis();
+      enroll();
+    }
     if (xQueueReceive(apiQueue, &event, pdMS_TO_TICKS(30)) == pdTRUE) {
       if (event.eventType == 1) reportButton();
     }
@@ -346,7 +368,7 @@ void setup() {
   apiQueue = xQueueCreate(20, sizeof(APIEvent));
   xTaskCreatePinnedToCore(ButtonTask, "ButtonTask", 4096, NULL, 3, NULL, 1);
   xTaskCreatePinnedToCore(BeamTask, "BeamTask", 4096, NULL, 4, NULL, 1);
-  xTaskCreatePinnedToCore(APITask, "APITask", 16384, NULL, 1, NULL, 0);
+  xTaskCreatePinnedToCore(APITask, "APITask", 32768, NULL, 1, NULL, 0);
   xTaskCreatePinnedToCore(WiFiTask, "WiFiTask", 4096, NULL, 1, NULL, 0);
   Serial.println("[SYSTEM] READY");
   Serial.println("[IR] Waiting for website timer...");

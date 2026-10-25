@@ -14,6 +14,7 @@
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <esp_now.h>
+#include <esp_wifi.h>
 #include <Preferences.h>
 #include <ArduinoJson.h>
 
@@ -115,30 +116,39 @@ bool postJson(const String& path, const String& body, String& response, bool aut
     Serial.println("[API] Wi-Fi offline");
     return false;
   }
+  const char* host = "smart-billiard.vercel.app";
+  IPAddress ip;
+  if (!WiFi.hostByName(host, ip)) {
+    Serial.println("[API] DNS failed");
+    return false;
+  }
+  Serial.printf("[API] DNS %s heap=%u\n", ip.toString().c_str(), ESP.getFreeHeap());
+
   WiFiClientSecure client;
   client.setInsecure();
-  client.setHandshakeTimeout(20000);
+  client.setHandshakeTimeout(30);
   client.setTimeout(20000);
   HTTPClient http;
   http.setReuse(false);
-  http.setConnectTimeout(20000);
   http.setTimeout(20000);
-  String url = String(API_BASE) + path;
-  if (!http.begin(client, url)) {
+  if (!http.begin(client, host, 443, path, true)) {
     Serial.println("[API] begin failed");
     return false;
   }
   http.addHeader("Content-Type", "application/json");
   http.addHeader("Connection", "close");
   if (auth && deviceSecret.length()) http.addHeader("Authorization", String("Bearer ") + deviceSecret);
-  int code = http.POST((uint8_t*)body.c_str(), body.length());
+  int code = http.POST(body);
   response = http.getString();
   if (code < 0) {
-    Serial.printf("[API] POST %s -> %d (%s) heap=%u\n", path.c_str(), code, http.errorToString(code).c_str(), ESP.getFreeHeap());
+    char err[80] = {0};
+    int tls = client.lastError(err, sizeof(err));
+    Serial.printf("[API] POST %s -> %d (%s) tls=%d %s\n", path.c_str(), code, http.errorToString(code).c_str(), tls, err);
   } else {
     Serial.printf("[API] POST %s -> %d\n", path.c_str(), code);
   }
   http.end();
+  client.stop();
   if (code == 401) Serial.println("[API] Unauthorized");
   return code >= 200 && code < 300;
 }
@@ -339,6 +349,8 @@ void setup() {
   loadSecret();
 
   WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  esp_wifi_set_ps(WIFI_PS_NONE);
   WiFiManager wm;
   wm.setConfigPortalTimeout(180);
   if (!wm.autoConnect("Billiard-Setup", "12345678")) {
@@ -363,6 +375,12 @@ void setup() {
     Serial.println("[ESP-NOW] peer failed");
     return;
   }
+  esp_wifi_set_ps(WIFI_PS_NONE);
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[WIFI] Reconnecting after ESP-NOW");
+    WiFi.reconnect();
+    delay(2000);
+  }
 
   radioMutex = xSemaphoreCreateMutex();
   apiQueue = xQueueCreate(20, sizeof(APIEvent));
@@ -370,6 +388,7 @@ void setup() {
   xTaskCreatePinnedToCore(BeamTask, "BeamTask", 4096, NULL, 4, NULL, 1);
   xTaskCreatePinnedToCore(APITask, "APITask", 32768, NULL, 1, NULL, 0);
   xTaskCreatePinnedToCore(WiFiTask, "WiFiTask", 4096, NULL, 1, NULL, 0);
+  Serial.println("[SB] firmware 1.3.1");
   Serial.println("[SYSTEM] READY");
   Serial.println("[IR] Waiting for website timer...");
 }

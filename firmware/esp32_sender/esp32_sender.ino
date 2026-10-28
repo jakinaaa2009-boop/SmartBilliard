@@ -1,398 +1,1935 @@
 /*
-  Smart Billiard sender
-  BUTTON GPIO 27, IR TX GPIO 26, IR RX GPIO 25
-  IR: 38 kHz, 600 us on, 600 us off, 10 bursts
-  Server commands:
-    OPEN_BOX / CLOSE_BOX
-    START_BALL_COUNT or TIME_EXPIRED  -> IR on, count reset
-    START_ALARM                       -> IR stays on, count kept
-    STOP_BALL_COUNT / STOP_ALARM      -> IR off
+  SMART BILLIARD ESP32 SENDER
+  IR + MPU6050 + BUZZER + WEBSITE + ESP-NOW
+
+  Target: ESP32 Dev Module
+  Arduino ESP32 Core 3.x
+
+  GPIO:
+  27 - Button
+  26 - IR Transmitter
+  25 - IR Receiver
+  21 - MPU6050 SDA
+  22 - MPU6050 SCL
+  33 - Buzzer
+   2 - WiFi LED
+
+  BALL DETECTION:
+  1. IR beam interrupted
+  2. MPU6050 detects impact
+  3. Ball count +1
+  4. Send count to website
+
+  Alarm:
+  - Target: 12 balls
+  - No progress for 30 seconds: buzzer ON
+  - 12 balls returned: buzzer OFF
 */
 
+#include <Arduino.h>
 #include <WiFi.h>
-#include <WiFiManager.h>
+#include <WebServer.h>
+#include <DNSServer.h>
+#include <esp_system.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <esp_now.h>
-#include <esp_wifi.h>
+#include <esp_idf_version.h>
+#include <esp_err.h>
 #include <Preferences.h>
 #include <ArduinoJson.h>
+#include <Wire.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+#include <math.h>
+
+// =======================================
+// WEBSITE CONFIGURATION
+// =======================================
 
 const char* API_BASE = "https://smart-billiard.vercel.app";
+
 const char* DEVICE_ID = "billiard_01";
 const char* DEVICE_NAME = "Billiard 01";
+
 const char* DEVICE_SECRET_OVERRIDE = "";
 
+// =======================================
+// GPIO CONFIGURATION
+// =======================================
+
 #define BUTTON_PIN 27
+
 #define IR_TX 26
 #define IR_RX 25
 
-uint8_t receiverAddress[] = {0x58, 0x2A, 0xBD, 0xD8, 0x9C, 0x00};
+#define MPU_SDA 21
+#define MPU_SCL 22
 
+#define BUZZER_PIN 33
+
+#define WIFI_LED 2
+
+#define BUZZER_ON HIGH
+#define BUZZER_OFF LOW
+
+#define WIFI_LED_ON HIGH
+#define WIFI_LED_OFF LOW
+
+// =======================================
+// BALL DETECTION SETTINGS
+// =======================================
+
+// Required balls
+const uint32_t BALL_TARGET = 12;
+
+// MPU vibration sensitivity (m/s2)
+const float IMPACT_THRESHOLD = 1.70f;
+
+// Gravity baseline adaptation
+const float BASELINE_ALPHA = 0.008f;
+
+// Time to detect MPU after IR (ms)
+const uint32_t IMPACT_WINDOW_MS = 1800;
+
+// Minimum time between counted balls
+const uint32_t BALL_COOLDOWN_MS = 220;
+
+// IR debounce
+const uint8_t BLOCKED_SAMPLES_REQUIRED = 2;
+const uint8_t CLEAR_SAMPLES_REQUIRED = 2;
+
+// =======================================
+// BUZZER SETTINGS
+// =======================================
+
+// 30 seconds without confirmed ball
+const uint32_t ALARM_IDLE_TIMEOUT_MS = 30000;
+
+// Buzzer beep pattern
+const uint32_t BEEP_ON_MS = 250;
+const uint32_t BEEP_OFF_MS = 650;
+
+// =======================================
+// IR SETTINGS
+// =======================================
+
+// Most 38kHz IR receivers output LOW
+// when the IR carrier is detected.
+//
+// If your receiver has different polarity,
+// this must be adjusted.
+
+const int IR_RECEIVED_LEVEL = LOW;
+
+// Require 3 detections from 4 samples
+const uint8_t IR_CARRIER_HITS_FOR_CLEAR = 3;
+
+// =======================================
+// ESP-NOW RECEIVER
+// =======================================
+
+uint8_t receiverAddress[] = {
+  0x58, 0x2A, 0xBD, 0xD8, 0x9C, 0x00
+};
+
+// Must match receiver firmware
 typedef struct __attribute__((packed)) {
-  uint8_t command;  // 1 toggle, 2 open, 3 close
+  uint8_t command;
+  // 1 = Toggle
+  // 2 = Open
+  // 3 = Close
 } RadioMessage;
 
-RadioMessage radioMsg;
-esp_now_peer_info_t peerInfo;
-Preferences prefs;
-String deviceSecret;
-volatile bool doorOpen = false;
-volatile bool ballCounterActive = false;
-volatile uint32_t ballCount = 0;
-volatile uint32_t lastPostedCount = 0;
-volatile bool countDirty = false;
-SemaphoreHandle_t radioMutex;
-QueueHandle_t apiQueue;
-
 struct APIEvent {
-  int eventType;  // 1 button, 2 ball
+  int eventType;
   int value;
 };
 
+// =======================================
+// GLOBAL OBJECTS
+// =======================================
+
+Preferences prefs;
+
+Adafruit_MPU6050 mpu;
+
+// Hardware may be absent: never prevent WiFi / ESP-NOW startup.
+bool mpuReady = false;
+bool espNowReady = false;
+
+// WiFiManager-free configuration portal. No automatic ESP.restart() calls.
+// Hotspot is always available for configuration, even without router access.
+const char* SETUP_AP_SSID = "Billiard-Setup";
+const char* SETUP_AP_PASSWORD = "12345678";
+WebServer configServer(80);
+DNSServer captiveDns;
+bool configPortalActive = false;
+volatile bool newCredentialsPending = false;
+volatile bool forgetCredentialsPending = false;
+
+// RTC memory survives software reset and helps distinguish a reboot loop.
+RTC_DATA_ATTR uint32_t bootCount = 0;
+RTC_DATA_ATTR uint32_t lastBootStage = 0; // 1=WiFi,2=ESP-NOW,3=MPU,4=Tasks,5=Ready
+
+
+String deviceSecret;
+
+RadioMessage radioMsg;
+
+esp_now_peer_info_t peerInfo;
+
+SemaphoreHandle_t radioMutex = NULL;
+
+QueueHandle_t apiQueue = NULL;
+
+// Shared state mutex
+portMUX_TYPE stateMux =
+  portMUX_INITIALIZER_UNLOCKED;
+
+// =======================================
+// GLOBAL STATE
+// =======================================
+
+bool doorOpen = false;
+
+bool ballCounterActive = false;
+
+bool forceAlarm = false;
+
+bool alarmMuted = false;
+
+uint32_t ballCount = 0;
+
+uint32_t counterGeneration = 0;
+
+uint32_t lastBallProgressMs = 0;
+
+bool countDirty = false;
+
+uint32_t lastPostedCount = 0;
+
+// =======================================
+// COUNTER SNAPSHOT
+// =======================================
+
+struct CounterSnapshot {
+  bool active;
+  bool forced;
+  bool muted;
+  uint32_t count;
+  uint32_t generation;
+  uint32_t lastProgress;
+  bool dirty;
+};
+
+// Explicit prototype prevents Arduino auto-prototype from moving this before the struct.
+CounterSnapshot snapshotCounter();
+
+CounterSnapshot snapshotCounter() {
+
+  CounterSnapshot s;
+
+  portENTER_CRITICAL(&stateMux);
+
+  s.active = ballCounterActive;
+  s.forced = forceAlarm;
+  s.muted = alarmMuted;
+  s.count = ballCount;
+  s.generation = counterGeneration;
+  s.lastProgress = lastBallProgressMs;
+  s.dirty = countDirty;
+
+  portEXIT_CRITICAL(&stateMux);
+
+  return s;
+}
+
+// =======================================
+// DOOR STATUS
+// =======================================
+
+bool snapshotDoorOpen() {
+
+  portENTER_CRITICAL(&stateMux);
+
+  bool result = doorOpen;
+
+  portEXIT_CRITICAL(&stateMux);
+
+  return result;
+}
+
+void setDoorOpen(bool open) {
+
+  portENTER_CRITICAL(&stateMux);
+
+  doorOpen = open;
+
+  portEXIT_CRITICAL(&stateMux);
+}
+
+// =======================================
+// WIFI LED
+// =======================================
+
+void updateWiFiLED() {
+
+  if (WiFi.status() == WL_CONNECTED) {
+    digitalWrite(WIFI_LED, WIFI_LED_ON);
+  } else {
+    digitalWrite(WIFI_LED, WIFI_LED_OFF);
+  }
+}
+
+// =======================================
+// SAVE DEVICE SECRET
+// =======================================
+
 void saveSecret(const String& secret) {
+
   deviceSecret = secret;
+
   prefs.begin("smartbilliard", false);
+
   prefs.putString("secret", secret);
+
   prefs.end();
+
   Serial.println("[AUTH] Secret stored");
 }
 
+// =======================================
+// LOAD DEVICE SECRET
+// =======================================
+
 void loadSecret() {
+
   if (strlen(DEVICE_SECRET_OVERRIDE) > 0) {
+
     deviceSecret = DEVICE_SECRET_OVERRIDE;
     return;
   }
+
   prefs.begin("smartbilliard", true);
+
   deviceSecret = prefs.getString("secret", "");
+
   prefs.end();
 }
 
-void OnDataSent(const uint8_t* mac, esp_now_send_status_t status) {
-  Serial.printf("[ESP-NOW] Delivery: %s\n", status == ESP_NOW_SEND_SUCCESS ? "SUCCESS" : "FAILED");
+// =======================================
+// ESP-NOW SEND CALLBACK
+// =======================================
+
+void printSendStatus(
+  esp_now_send_status_t status
+) {
+
+  Serial.printf(
+    "[ESP-NOW] Delivery: %s\n",
+    status == ESP_NOW_SEND_SUCCESS
+      ? "SUCCESS"
+      : "FAILED"
+  );
 }
+
+// Support ESP-IDF callback signatures
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 5, 0)
+
+void OnDataSent(
+  const esp_now_send_info_t* info,
+  esp_now_send_status_t status
+) {
+  printSendStatus(status);
+}
+
+#else
+
+void OnDataSent(
+  const uint8_t* mac,
+  esp_now_send_status_t status
+) {
+  printSendStatus(status);
+}
+
+#endif
+
+// =======================================
+// SEND ESP-NOW COMMAND
+// =======================================
 
 void sendRadio(uint8_t command) {
-  if (!radioMutex || xSemaphoreTake(radioMutex, pdMS_TO_TICKS(200)) != pdTRUE) return;
-  radioMsg.command = command;
-  esp_err_t result = esp_now_send(receiverAddress, (uint8_t*)&radioMsg, sizeof(radioMsg));
-  xSemaphoreGive(radioMutex);
-  if (result == ESP_OK) Serial.printf("[ESP-NOW] command %u queued\n", command);
-  else Serial.printf("[ESP-NOW] send error %d\n", result);
-}
 
-void startBallCounter(bool resetCounter) {
-  if (ballCounterActive) {
-    Serial.printf("[IR] already counting, keep %u\n", (unsigned)ballCount);
+  if (!radioMutex || !espNowReady) {
+    Serial.println("[ESP-NOW] Not ready; command not sent");
     return;
   }
-  if (resetCounter) ballCount = 0;
-  ballCounterActive = true;
-  countDirty = true;
-  Serial.printf("[IR] BALL COUNTER STARTED count=%u\n", (unsigned)ballCount);
+
+  if (
+    xSemaphoreTake(
+      radioMutex,
+      pdMS_TO_TICKS(200)
+    ) != pdTRUE
+  ) {
+    return;
+  }
+
+  radioMsg.command = command;
+
+  esp_err_t result = esp_now_send(
+    receiverAddress,
+    (const uint8_t*)&radioMsg,
+    sizeof(radioMsg)
+  );
+
+  xSemaphoreGive(radioMutex);
+
+  Serial.printf(
+    "[ESP-NOW] Command %u: %s | channel %d | %s\n",
+    command,
+    result == ESP_OK ? "QUEUED" : "SEND ERROR",
+    WiFi.channel(),
+    esp_err_to_name(result)
+  );
 }
+
+// =======================================
+// START BALL COUNTER
+// =======================================
+
+void startBallCounter(bool resetCounter) {
+
+  portENTER_CRITICAL(&stateMux);
+
+  bool wasActive = ballCounterActive;
+
+  if (!wasActive) {
+
+    if (resetCounter) {
+      ballCount = 0;
+    }
+
+    ballCounterActive = true;
+
+    forceAlarm = false;
+    alarmMuted = false;
+
+    lastBallProgressMs = millis();
+
+    counterGeneration++;
+
+    countDirty = true;
+  }
+
+  uint32_t count = ballCount;
+
+  portEXIT_CRITICAL(&stateMux);
+
+  Serial.printf(
+    "[COUNT] %s - %lu / %lu\n",
+    wasActive ? "ALREADY ACTIVE" : "STARTED",
+    (unsigned long)count,
+    (unsigned long)BALL_TARGET
+  );
+}
+
+// =======================================
+// STOP BALL COUNTER
+// =======================================
 
 void stopBallCounter(bool resetCounter) {
+
+  portENTER_CRITICAL(&stateMux);
+
   ballCounterActive = false;
+
+  forceAlarm = false;
+  alarmMuted = false;
+
+  if (resetCounter) {
+    ballCount = 0;
+    countDirty = true;
+  }
+
+  counterGeneration++;
+
+  uint32_t count = ballCount;
+
+  portEXIT_CRITICAL(&stateMux);
+
   ledcWrite(IR_TX, 0);
-  if (resetCounter) ballCount = 0;
-  Serial.printf("[IR] BALL COUNTER STOPPED count=%u\n", (unsigned)ballCount);
+
+  digitalWrite(BUZZER_PIN, BUZZER_OFF);
+
+  Serial.printf(
+    "[COUNT] STOPPED - %lu\n",
+    (unsigned long)count
+  );
 }
+
+// =======================================
+// RESET COUNTER
+// =======================================
+
+void resetBallCounter() {
+
+  portENTER_CRITICAL(&stateMux);
+
+  ballCount = 0;
+
+  counterGeneration++;
+
+  countDirty = true;
+
+  lastBallProgressMs = millis();
+
+  forceAlarm = false;
+  alarmMuted = false;
+
+  portEXIT_CRITICAL(&stateMux);
+
+  digitalWrite(BUZZER_PIN, BUZZER_OFF);
+
+  Serial.println("[COUNT] RESET 0/12");
+}
+
+// =======================================
+// CONFIRM BALL
+// IR + MPU REQUIRED
+// =======================================
+
+bool confirmBall(uint32_t expectedGeneration) {
+
+  bool success = false;
+
+  uint32_t count = 0;
+
+  portENTER_CRITICAL(&stateMux);
+
+  if (
+    ballCounterActive &&
+    counterGeneration == expectedGeneration &&
+    ballCount < BALL_TARGET
+  ) {
+
+    ballCount++;
+
+    countDirty = true;
+
+    // Restart alarm timer
+    lastBallProgressMs = millis();
+
+    count = ballCount;
+
+    success = true;
+  }
+
+  portEXIT_CRITICAL(&stateMux);
+
+  if (success) {
+
+    Serial.printf(
+      "[BALL] IR + MPU CONFIRMED: %lu / %lu\n",
+      (unsigned long)count,
+      (unsigned long)BALL_TARGET
+    );
+
+    if (count == BALL_TARGET) {
+
+      Serial.println(
+        "[BALL] ALL 12 RETURNED!"
+      );
+
+      Serial.println(
+        "[ALARM] BUZZER OFF"
+      );
+
+      digitalWrite(
+        BUZZER_PIN,
+        BUZZER_OFF
+      );
+    }
+  }
+
+  return success;
+}
+
+// =======================================
+// ALARM COMMAND CONTROL
+// =======================================
+
+void setAlarmForced(bool enabled) {
+
+  portENTER_CRITICAL(&stateMux);
+
+  forceAlarm = enabled;
+
+  alarmMuted = !enabled;
+
+  portEXIT_CRITICAL(&stateMux);
+}
+
+// =======================================
+// IR BEAM SAMPLING
+// =======================================
 
 bool sampleBeamBlocked() {
-  int lows = 0;
-  for (int j = 0; j < 4; j++) {
+
+  uint8_t hits = 0;
+
+  for (uint8_t j = 0; j < 4; j++) {
+
+    // Send 38kHz IR
     ledcWrite(IR_TX, 128);
-    delayMicroseconds(400);
-    if (digitalRead(IR_RX) == LOW) lows++;
+
+    delayMicroseconds(450);
+
+    if (
+      digitalRead(IR_RX) == IR_RECEIVED_LEVEL
+    ) {
+      hits++;
+    }
+
+    // Stop IR temporarily
     ledcWrite(IR_TX, 0);
-    delayMicroseconds(250);
+
+    delayMicroseconds(350);
   }
-  return lows >= 3;
+
+  // Too few carrier detections
+  // means the beam is blocked
+  return hits < IR_CARRIER_HITS_FOR_CLEAR;
 }
 
-bool postJson(const String& path, const String& body, String& response, bool auth) {
+// =======================================
+// BUZZER TASK
+// =======================================
+
+void AlarmTask(void* parameter) {
+
+  bool previousAlarm = false;
+
+  while (true) {
+
+    CounterSnapshot s = snapshotCounter();
+
+    uint32_t now = millis();
+
+    bool timedOut =
+      (uint32_t)(now - s.lastProgress)
+      >= ALARM_IDLE_TIMEOUT_MS;
+
+    bool alarm =
+      s.active &&
+      s.count < BALL_TARGET &&
+      !s.muted &&
+      (s.forced || timedOut);
+
+    if (alarm != previousAlarm) {
+
+      Serial.printf(
+        "[ALARM] %s - BALLS: %lu/%lu\n",
+        alarm ? "ON" : "OFF",
+        (unsigned long)s.count,
+        (unsigned long)BALL_TARGET
+      );
+
+      previousAlarm = alarm;
+    }
+
+    if (!alarm) {
+
+      digitalWrite(
+        BUZZER_PIN,
+        BUZZER_OFF
+      );
+
+    } else {
+
+      // Intermittent buzzer
+      uint32_t cycle =
+        BEEP_ON_MS + BEEP_OFF_MS;
+
+      bool beep =
+        (now % cycle) < BEEP_ON_MS;
+
+      digitalWrite(
+        BUZZER_PIN,
+        beep ? BUZZER_ON : BUZZER_OFF
+      );
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
+}
+
+// =======================================
+// HTTP POST
+// =======================================
+
+bool postJson(
+  const String& path,
+  const String& body,
+  String& response,
+  bool auth
+) {
+
+  response = "";
+
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("[API] Wi-Fi offline");
     return false;
   }
-  const char* host = "smart-billiard.vercel.app";
-  IPAddress ip;
-  if (!WiFi.hostByName(host, ip)) {
-    Serial.println("[API] DNS failed");
-    return false;
+
+  String uri = path.startsWith("/") ? path : "/" + path;
+
+  String host = API_BASE;
+  if (host.startsWith("https://")) host.remove(0, 8);
+  else if (host.startsWith("http://")) host.remove(0, 7);
+  while (host.length() && host.endsWith("/")) {
+    host.remove(host.length() - 1);
   }
-  Serial.printf("[API] DNS %s heap=%u\n", ip.toString().c_str(), ESP.getFreeHeap());
 
   WiFiClientSecure client;
+
+  // Certificate is not validated. Vercel uses a public CA;
+  // setInsecure keeps the board working without a bundled root.
   client.setInsecure();
   client.setHandshakeTimeout(30);
   client.setTimeout(20000);
+
   HTTPClient http;
+
   http.setReuse(false);
   http.setTimeout(20000);
-  if (!http.begin(client, host, 443, path, true)) {
+
+  if (!http.begin(client, host.c_str(), 443, uri.c_str(), true)) {
     Serial.println("[API] begin failed");
     return false;
   }
-  http.addHeader("Content-Type", "application/json");
-  http.addHeader("Connection", "close");
-  if (auth && deviceSecret.length()) http.addHeader("Authorization", String("Bearer ") + deviceSecret);
-  int code = http.POST(body);
-  response = http.getString();
-  if (code < 0) {
-    char err[80] = {0};
-    int tls = client.lastError(err, sizeof(err));
-    Serial.printf("[API] POST %s -> %d (%s) tls=%d %s\n", path.c_str(), code, http.errorToString(code).c_str(), tls, err);
-  } else {
-    Serial.printf("[API] POST %s -> %d\n", path.c_str(), code);
+
+  http.addHeader(
+    "Content-Type",
+    "application/json"
+  );
+
+  http.addHeader(
+    "Connection",
+    "close"
+  );
+
+  if (auth && deviceSecret.length()) {
+
+    http.addHeader(
+      "Authorization",
+      String("Bearer ") + deviceSecret
+    );
   }
+
+  int code = http.POST(body);
+
+  response = http.getString();
+
+  if (code < 0) {
+    String err = HTTPClient::errorToString(code);
+    Serial.printf(
+      "[API] POST %s failed: %s\n",
+      uri.c_str(),
+      err.c_str()
+    );
+  } else {
+    Serial.printf(
+      "[API] POST %s -> %d\n",
+      uri.c_str(),
+      code
+    );
+  }
+
   http.end();
   client.stop();
-  if (code == 401) Serial.println("[API] Unauthorized");
+
+  if (code == 401) {
+    Serial.println("[API] Unauthorized");
+    if (auth && deviceSecret.length()) {
+      deviceSecret = "";
+      prefs.begin("smartbilliard", false);
+      prefs.remove("secret");
+      prefs.end();
+      Serial.println("[AUTH] Stored secret cleared");
+    }
+  }
+
   return code >= 200 && code < 300;
 }
 
+// =======================================
+// HANDLE WEBSITE COMMANDS
+// =======================================
+
 void handleApiJson(const String& response) {
+
   JsonDocument doc;
-  if (deserializeJson(doc, response)) return;
+
+  if (deserializeJson(doc, response)) {
+    return;
+  }
+
   const char* secret = doc["secret"];
-  if (secret && strlen(secret) > 0) saveSecret(secret);
+
+  if (secret && strlen(secret) > 0) {
+    saveSecret(secret);
+  }
 
   JsonVariant cmd = doc["command"];
+
   if (cmd.isNull()) return;
+
   const char* commandId = cmd["commandId"];
+
   const char* command = cmd["command"];
+
   if (!commandId || !command) return;
 
   bool ok = true;
+
+  Serial.printf(
+    "[COMMAND] %s\n",
+    command
+  );
+
   if (strcmp(command, "OPEN_BOX") == 0) {
-    doorOpen = true;
+
+    setDoorOpen(true);
+
     sendRadio(2);
+
     stopBallCounter(true);
-    Serial.println("[COMMAND] OPEN BOX");
-  } else if (strcmp(command, "CLOSE_BOX") == 0) {
-    doorOpen = false;
+
+  } else if (
+    strcmp(command, "CLOSE_BOX") == 0
+  ) {
+
+    setDoorOpen(false);
+
     sendRadio(3);
-    Serial.println("[COMMAND] CLOSE BOX");
-  } else if (strcmp(command, "START_BALL_COUNT") == 0 || strcmp(command, "TIME_EXPIRED") == 0) {
+
+  } else if (
+    strcmp(command, "START_BALL_COUNT") == 0 ||
+    strcmp(command, "TIME_EXPIRED") == 0
+  ) {
+
+    // Start IR + MPU counting
     startBallCounter(true);
-    Serial.println("[COMMAND] TIMER FINISHED");
-  } else if (strcmp(command, "START_ALARM") == 0) {
+
+    Serial.println(
+      "[SYSTEM] TIMER EXPIRED - COUNTING"
+    );
+
+  } else if (
+    strcmp(command, "START_ALARM") == 0
+  ) {
+
     startBallCounter(false);
-    Serial.println("[COMMAND] ALARM, count kept");
-  } else if (strcmp(command, "STOP_BALL_COUNT") == 0 || strcmp(command, "STOP_ALARM") == 0) {
+
+    // Website requests immediate alarm
+    setAlarmForced(true);
+
+  } else if (
+    strcmp(command, "STOP_BALL_COUNT") == 0
+  ) {
+
     stopBallCounter(false);
-  } else if (strcmp(command, "RESET_BALL_COUNT") == 0) {
-    ballCount = 0;
-  } else if (strcmp(command, "RESET") == 0) {
-    doorOpen = false;
+
+  } else if (
+    strcmp(command, "STOP_ALARM") == 0
+  ) {
+
+    setAlarmForced(false);
+
+  } else if (
+    strcmp(command, "RESET_BALL_COUNT") == 0
+  ) {
+
+    resetBallCounter();
+
+  } else if (
+    strcmp(command, "RESET") == 0
+  ) {
+
+    setDoorOpen(false);
+
     sendRadio(3);
+
     stopBallCounter(true);
+
   } else {
+
     ok = false;
   }
 
-  String resultBody = String("{\"commandId\":\"") + commandId + "\",\"success\":" + (ok ? "true" : "false") + "}";
+  // Confirm command to server
+  String resultBody =
+    String("{\"commandId\":\"") +
+    commandId +
+    "\",\"success\":" +
+    (ok ? "true" : "false") +
+    "}";
+
   String ignored;
-  postJson(String("/api/iot/devices/") + DEVICE_ID + "/command-result", resultBody, ignored, true);
+
+  postJson(
+    String("/api/iot/devices/") +
+      DEVICE_ID +
+      "/command-result",
+    resultBody,
+    ignored,
+    true
+  );
 }
 
+// =======================================
+// DEVICE ENROLLMENT
+// =======================================
+
 void enroll() {
-  if (deviceSecret.length()) return;
+
+  if (
+    deviceSecret.length() ||
+    WiFi.status() != WL_CONNECTED
+  ) {
+    return;
+  }
+
   String body = "{";
-  body += "\"deviceId\":\"" + String(DEVICE_ID) + "\",";
-  body += "\"name\":\"" + String(DEVICE_NAME) + "\",";
-  body += "\"firmwareVersion\":\"1.3.0\",";
-  body += "\"uptime\":" + String(millis() / 1000) + ",";
-  body += "\"wifiRssi\":" + String(WiFi.RSSI()) + ",";
-  body += "\"ipAddress\":\"" + WiFi.localIP().toString() + "\"";
+
+  body += "\"deviceId\":\"" +
+    String(DEVICE_ID) + "\",";
+
+  body += "\"name\":\"" +
+    String(DEVICE_NAME) + "\",";
+
+  body += "\"firmwareVersion\":\"1.4.1\",";
+
+  body += "\"uptime\":" +
+    String(millis() / 1000) + ",";
+
+  body += "\"wifiRssi\":" +
+    String(WiFi.RSSI()) + ",";
+
+  body += "\"ipAddress\":\"" +
+    WiFi.localIP().toString() + "\"";
+
   body += "}";
+
   String response;
-  if (postJson("/api/iot/announce", body, response, false)) {
+
+  if (
+    postJson(
+      "/api/iot/announce",
+      body,
+      response,
+      false
+    )
+  ) {
+
     handleApiJson(response);
-    if (deviceSecret.length()) Serial.println("[AUTH] Enrolled");
-    else Serial.println("[AUTH] Enrollment failed: no secret in response");
+
+    Serial.println("[AUTH] Enrolled");
+
   } else {
+
     Serial.println("[AUTH] Enrollment failed");
-    if (response.length()) Serial.println(response);
+    if (response.length()) {
+      Serial.println(response);
+    }
   }
 }
 
+// =======================================
+// HEARTBEAT
+// =======================================
+
 void heartbeat() {
+
+  CounterSnapshot s = snapshotCounter();
+
+  bool open = snapshotDoorOpen();
+
   String body = "{";
-  body += "\"deviceId\":\"" + String(DEVICE_ID) + "\",";
-  body += "\"name\":\"" + String(DEVICE_NAME) + "\",";
-  body += "\"firmwareVersion\":\"1.3.0\",";
-  body += "\"uptime\":" + String(millis() / 1000) + ",";
-  body += "\"wifiRssi\":" + String(WiFi.RSSI()) + ",";
-  body += "\"ipAddress\":\"" + WiFi.localIP().toString() + "\",";
-  body += "\"boxStatus\":\"" + String(doorOpen ? "UNLOCKED" : "LOCKED") + "\",";
-  body += "\"ballCounterActive\":" + String(ballCounterActive ? "true" : "false") + ",";
-  body += "\"ballCount\":" + String((uint32_t)ballCount);
+
+  body += "\"deviceId\":\"" +
+    String(DEVICE_ID) + "\",";
+
+  body += "\"name\":\"" +
+    String(DEVICE_NAME) + "\",";
+
+  body += "\"firmwareVersion\":\"1.4.1\",";
+
+  body += "\"uptime\":" +
+    String(millis() / 1000) + ",";
+
+  body += "\"wifiRssi\":" +
+    String(WiFi.RSSI()) + ",";
+
+  body += "\"ipAddress\":\"" +
+    WiFi.localIP().toString() + "\",";
+
+  body += "\"boxStatus\":\"" +
+    String(open ? "UNLOCKED" : "LOCKED") +
+    "\",";
+
+  body += "\"ballCounterActive\":" +
+    String(s.active ? "true" : "false") +
+    ",";
+
+  body += "\"ballCount\":" +
+    String(s.count);
+
   body += "}";
+
   String response;
-  if (postJson("/api/iot/announce", body, response, true)) handleApiJson(response);
+
+  if (
+    postJson(
+      "/api/iot/announce",
+      body,
+      response,
+      true
+    )
+  ) {
+
+    handleApiJson(response);
+  }
 }
+
+// =======================================
+// REPORT BUTTON
+// =======================================
 
 void reportButton() {
-  String body = "{\"device\":\"" + String(DEVICE_ID) + "\",\"action\":\"button_pressed\",\"eventType\":1,\"value\":1}";
+
+  String body =
+    "{\"device\":\"" +
+    String(DEVICE_ID) +
+    "\",\"action\":\"button_pressed\","
+    "\"eventType\":1,\"value\":1}";
+
   String response;
-  if (postJson("/api/button", body, response, true)) handleApiJson(response);
+
+  if (
+    postJson(
+      "/api/button",
+      body,
+      response,
+      true
+    )
+  ) {
+
+    handleApiJson(response);
+  }
 }
 
+// =======================================
+// SEND BALL COUNT TO WEBSITE
+// =======================================
+
 void reportLatestCount() {
-  uint32_t count = ballCount;
-  String body = "{\"device\":\"" + String(DEVICE_ID) + "\",\"action\":\"ball_detected\",\"eventType\":2,\"value\":" + String((unsigned)count) + "}";
+
+  CounterSnapshot snap = snapshotCounter();
+
+  String body =
+    "{\"device\":\"" +
+    String(DEVICE_ID) +
+    "\",\"action\":\"ball_detected\","
+    "\"eventType\":2,\"value\":" +
+    String(snap.count) +
+    "}";
+
   String response;
-  if (!postJson("/api/button", body, response, true)) return;
-  if (ballCount == count) countDirty = false;
-  lastPostedCount = count;
+
+  if (!postJson(
+    "/api/button",
+    body,
+    response,
+    true
+  )) {
+    return;
+  }
+
+  portENTER_CRITICAL(&stateMux);
+
+  lastPostedCount = snap.count;
+
+  if (
+    ballCount == snap.count &&
+    counterGeneration == snap.generation
+  ) {
+    countDirty = false;
+  }
+
+  portEXIT_CRITICAL(&stateMux);
+
   handleApiJson(response);
 }
 
+// =======================================
+// BUTTON TASK
+// =======================================
+
 void ButtonTask(void* parameter) {
+
   bool last = HIGH;
-  unsigned long lastPress = 0;
+
+  uint32_t lastPress = 0;
+
   while (true) {
+
     bool state = digitalRead(BUTTON_PIN);
-    if (last == HIGH && state == LOW && millis() - lastPress > 200) {
+
+    if (
+      last == HIGH &&
+      state == LOW &&
+      millis() - lastPress > 200
+    ) {
+
       lastPress = millis();
-      doorOpen = !doorOpen;
-      Serial.println(doorOpen ? "[BUTTON] OPEN" : "[BUTTON] CLOSE");
+
+      bool nextDoor = !snapshotDoorOpen();
+
+      setDoorOpen(nextDoor);
+
+      Serial.printf(
+        "[BUTTON] %s\n",
+        nextDoor ? "OPEN" : "CLOSE"
+      );
+
       sendRadio(1);
+
       APIEvent event{1, 1};
-      xQueueSend(apiQueue, &event, 0);
+
+      xQueueSend(
+        apiQueue,
+        &event,
+        0
+      );
     }
+
     last = state;
+
     vTaskDelay(pdMS_TO_TICKS(10));
   }
 }
 
-void BeamTask(void* parameter) {
-  bool inBall = false;
-  int clearSamples = 0;
-  unsigned long lastCountMs = 0;
+// =======================================
+// IR + MPU6050 SENSOR TASK
+// =======================================
+
+void SensorTask(void* parameter) {
+
+  // This task is only created if mpuReady, but keep the guard for safety.
+  if (!mpuReady) {
+    Serial.println("[SENSOR] MPU6050 absent; IR+MPU ball counting unavailable");
+    vTaskDelete(NULL);
+    return;
+  }
+
+  bool beamArmed = false;
+
+  bool previousImpactHigh = false;
+
+  bool waitingForImpact = false;
+
+  uint8_t blockedSamples = 0;
+
+  uint8_t clearSamples = 0;
+
+  uint32_t pendingSince = 0;
+
+  uint32_t lastBallAt = 0;
+
+  uint32_t lastStatus = 0;
+
+  uint32_t seenGeneration = UINT32_MAX;
+
+  float baseX = 0;
+  float baseY = 0;
+  float baseZ = 0;
+
+  sensors_event_t a, g, temp;
+
+  // =====================================
+  // MPU INITIAL CALIBRATION
+  // =====================================
+
+  Serial.println(
+    "[MPU] Calibrating..."
+  );
+
+  int validSamples = 0;
+
+  for (int i = 0; i < 40; i++) {
+
+    if (mpu.getEvent(&a, &g, &temp)) {
+
+      baseX += a.acceleration.x;
+      baseY += a.acceleration.y;
+      baseZ += a.acceleration.z;
+
+      validSamples++;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
+
+  if (validSamples > 0) {
+
+    baseX /= validSamples;
+    baseY /= validSamples;
+    baseZ /= validSamples;
+  }
+
+  Serial.println(
+    "[MPU] Calibration complete"
+  );
+
+  // =====================================
+  // SENSOR MAIN LOOP
+  // =====================================
+
   while (true) {
-    if (!ballCounterActive) {
-      ledcWrite(IR_TX, 0);
-      inBall = false;
+
+    CounterSnapshot s = snapshotCounter();
+
+    uint32_t now = millis();
+
+    // Detect new session or reset
+    if (s.generation != seenGeneration) {
+
+      seenGeneration = s.generation;
+
+      beamArmed = false;
+      waitingForImpact = false;
+
+      blockedSamples = 0;
       clearSamples = 0;
-      vTaskDelay(pdMS_TO_TICKS(15));
+
+      lastBallAt = 0;
+
+      previousImpactHigh = false;
+    }
+
+    // ===================================
+    // COUNTER DISABLED OR COMPLETED
+    // ===================================
+
+    if (!s.active || s.count >= BALL_TARGET) {
+
+      ledcWrite(IR_TX, 0);
+
+      waitingForImpact = false;
+
+      if (mpu.getEvent(&a, &g, &temp)) {
+
+        baseX += BASELINE_ALPHA *
+          (a.acceleration.x - baseX);
+
+        baseY += BASELINE_ALPHA *
+          (a.acceleration.y - baseY);
+
+        baseZ += BASELINE_ALPHA *
+          (a.acceleration.z - baseZ);
+      }
+
+      previousImpactHigh = false;
+
+      vTaskDelay(pdMS_TO_TICKS(20));
+
       continue;
     }
+
+    // ===================================
+    // READ MPU6050
+    // ===================================
+
+    bool readingOK =
+      mpu.getEvent(&a, &g, &temp);
+
+    float impact = 0.0f;
+
+    if (readingOK) {
+
+      float dx = a.acceleration.x - baseX;
+      float dy = a.acceleration.y - baseY;
+      float dz = a.acceleration.z - baseZ;
+
+      // Dynamic acceleration magnitude
+      impact = sqrtf(
+        dx * dx +
+        dy * dy +
+        dz * dz
+      );
+
+      // Update gravity baseline
+      baseX += BASELINE_ALPHA * dx;
+      baseY += BASELINE_ALPHA * dy;
+      baseZ += BASELINE_ALPHA * dz;
+    }
+
+    // ===================================
+    // DETECT NEW MPU IMPACT
+    // ===================================
+
+    bool impactHigh =
+      readingOK &&
+      impact >= IMPACT_THRESHOLD;
+
+    bool newImpact =
+      impactHigh &&
+      !previousImpactHigh;
+
+    previousImpactHigh = impactHigh;
+
+    // ===================================
+    // READ IR SENSOR
+    // ===================================
+
     bool blocked = sampleBeamBlocked();
+
     if (blocked) {
-      clearSamples = 0;
-      if (!inBall && millis() - lastCountMs >= 12) {
-        inBall = true;
-        lastCountMs = millis();
-        ballCount++;
-        countDirty = true;
-        Serial.printf("[BALL] DETECTED -> %u\n", (unsigned)ballCount);
+
+      if (blockedSamples < 10) {
+        blockedSamples++;
       }
-    } else if (inBall) {
-      clearSamples++;
-      if (clearSamples >= 1) {
-        inBall = false;
-        clearSamples = 0;
+
+      clearSamples = 0;
+
+    } else {
+
+      if (clearSamples < 10) {
+        clearSamples++;
+      }
+
+      blockedSamples = 0;
+
+      // Arm for next ball
+      if (
+        clearSamples >= CLEAR_SAMPLES_REQUIRED &&
+        (
+          lastBallAt == 0 ||
+          (uint32_t)(now - lastBallAt)
+            >= BALL_COOLDOWN_MS
+        )
+      ) {
+
+        beamArmed = true;
       }
     }
-    vTaskDelay(pdMS_TO_TICKS(1));
+
+    // ===================================
+    // IR DETECTED
+    // WAIT FOR MPU IMPACT
+    // ===================================
+
+    if (
+      !waitingForImpact &&
+      beamArmed &&
+      blockedSamples >= BLOCKED_SAMPLES_REQUIRED &&
+      (
+        lastBallAt == 0 ||
+        (uint32_t)(now - lastBallAt)
+          >= BALL_COOLDOWN_MS
+      )
+    ) {
+
+      waitingForImpact = true;
+
+      pendingSince = now;
+
+      beamArmed = false;
+
+      Serial.println(
+        "[IR] BEAM BLOCKED"
+      );
+
+      Serial.println(
+        "[IR] Waiting for MPU impact..."
+      );
+    }
+
+    // ===================================
+    // VERIFY BALL USING MPU6050
+    // ===================================
+
+    if (waitingForImpact) {
+
+      // IR occurred but MPU did not confirm
+      if (
+        (uint32_t)(now - pendingSince)
+          > IMPACT_WINDOW_MS
+      ) {
+
+        waitingForImpact = false;
+
+        Serial.println(
+          "[BALL] REJECTED - NO MPU IMPACT"
+        );
+
+      } else if (newImpact) {
+
+        // Both sensors confirmed
+        if (confirmBall(seenGeneration)) {
+
+          lastBallAt = now;
+
+          Serial.printf(
+            "[MPU] IMPACT: %.2f m/s2\n",
+            impact
+          );
+
+          Serial.println(
+            "[BALL] COUNTED SUCCESSFULLY"
+          );
+        }
+
+        waitingForImpact = false;
+      }
+    }
+
+    // ===================================
+    // SENSOR SERIAL MONITOR
+    // ===================================
+
+    if (
+      (uint32_t)(now - lastStatus) >= 1000
+    ) {
+
+      lastStatus = now;
+
+      CounterSnapshot live =
+        snapshotCounter();
+
+      Serial.printf(
+        "[SENSOR] IR=%s | MPU=%.2f | "
+        "Threshold=%.2f | Balls=%lu/%lu | "
+        "Pending=%s\n",
+        blocked ? "BLOCKED" : "CLEAR",
+        impact,
+        IMPACT_THRESHOLD,
+        (unsigned long)live.count,
+        (unsigned long)BALL_TARGET,
+        waitingForImpact ? "YES" : "NO"
+      );
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(5));
   }
 }
 
+// =======================================
+// WEBSITE API TASK
+// =======================================
+
 void APITask(void* parameter) {
-  unsigned long lastBeat = 0;
-  unsigned long lastEnroll = 0;
-  unsigned long lastCountPost = 0;
+
+  enroll();
+
+  uint32_t lastBeat = 0;
+
+  uint32_t lastCountPost = 0;
+
+  uint32_t lastEnroll = 0;
+
   APIEvent event;
+
   while (true) {
-    if (!deviceSecret.length() && millis() - lastEnroll > 8000) {
-      lastEnroll = millis();
+
+    // Button events
+    if (
+      xQueueReceive(
+        apiQueue,
+        &event,
+        pdMS_TO_TICKS(40)
+      ) == pdTRUE
+    ) {
+
+      if (event.eventType == 1) {
+        reportButton();
+      }
+    }
+
+    uint32_t now = millis();
+
+    // ===================================
+    // DEVICE ENROLLMENT RETRY
+    // ===================================
+
+    if (
+      WiFi.status() == WL_CONNECTED &&
+      deviceSecret.length() == 0 &&
+      (uint32_t)(now - lastEnroll) >= 10000
+    ) {
+
       enroll();
+
+      lastEnroll = millis();
     }
-    if (xQueueReceive(apiQueue, &event, pdMS_TO_TICKS(30)) == pdTRUE) {
-      if (event.eventType == 1) reportButton();
-    }
-    if (deviceSecret.length() && ballCounterActive && (countDirty || ballCount != lastPostedCount) && millis() - lastCountPost > 60) {
+
+    // ===================================
+    // SEND BALL COUNT
+    // ===================================
+
+    CounterSnapshot s =
+      snapshotCounter();
+
+    if (
+      deviceSecret.length() &&
+      s.dirty &&
+      (uint32_t)(now - lastCountPost) >= 250
+    ) {
+
       reportLatestCount();
+
       lastCountPost = millis();
     }
-    unsigned long beatEvery = ballCounterActive ? 300 : 2000;
-    if (deviceSecret.length() && millis() - lastBeat > beatEvery) {
+
+    // ===================================
+    // HEARTBEAT
+    // ===================================
+
+    uint32_t heartbeatInterval =
+      s.active ? 1500UL : 4000UL;
+
+    if (
+      deviceSecret.length() &&
+      (uint32_t)(millis() - lastBeat)
+        >= heartbeatInterval
+    ) {
+
       heartbeat();
+
       lastBeat = millis();
     }
   }
 }
 
-void WiFiTask(void* parameter) {
-  while (true) {
-    if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("[WIFI] Reconnecting...");
-      WiFi.reconnect();
-    } else {
-      Serial.printf("[WIFI] %s RSSI %d\n", WiFi.localIP().toString().c_str(), WiFi.RSSI());
+// =======================================
+// WIFI CONFIGURATION (without WiFiManager)
+// =======================================
+
+// Use ESP32 Preferences instead of calling WiFiManager::autoConnect().
+// The portal is reachable at http://192.168.4.1 on Billiard-Setup.
+bool getSavedWiFi(String& ssid, String& password) {
+  Preferences p;
+  if (!p.begin("sbwifi", true)) return false;
+  ssid = p.getString("ssid", "");
+  password = p.getString("password", "");
+  p.end();
+  return !ssid.isEmpty();
+}
+
+bool hasSavedWiFi() {
+  String ssid, password;
+  return getSavedWiFi(ssid, password);
+}
+
+void startSavedWiFi() {
+  String ssid, password;
+  if (!getSavedWiFi(ssid, password)) {
+    Serial.println("[WIFI] No saved network. Use Billiard-Setup portal.");
+    return;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("[WIFI] Disconnecting old network to apply settings");
+    WiFi.disconnect(false, false);
+    delay(80);
+  }
+
+  Serial.printf("[WIFI] Connecting to saved SSID: %s\n", ssid.c_str());
+  WiFi.begin(ssid.c_str(), password.c_str());
+  // No reboot and no blocking wait here; WiFiTask observes connection.
+}
+
+const char* portalHtml = R"HTML(
+<!DOCTYPE html><html lang="en"><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="utf-8"><title>Smart Billiard Wi-Fi Setup</title>
+<style>body{font-family:system-ui,sans-serif;background:#101822;color:white;max-width:450px;margin:5vh auto;padding:20px}
+main{background:#1c2838;padding:25px;border-radius:16px}label{display:block;margin:15px 0 5px}
+input{box-sizing:border-box;width:100%;padding:12px;border-radius:8px;border:0;font-size:16px}
+button{background:#1c9bff;color:white;border:0;padding:13px 20px;border-radius:8px;margin-top:20px;font-weight:bold}
+small{color:#b1becd}</style></head><body><main><h2>Smart Billiard</h2>
+<p>Connect the sender ESP32 to your 2.4 GHz internet Wi-Fi.</p>
+<form method="POST" action="/save"><label>Wi-Fi name (SSID)</label>
+<input name="ssid" maxlength="32" required placeholder="Your 2.4 GHz Wi-Fi">
+<label>Wi-Fi password</label><input name="password" type="password" maxlength="63" placeholder="Wi-Fi password">
+<button type="submit">Save &amp; Connect</button></form>
+<p><small>Setup AP: Billiard-Setup / 12345678<br>
+Setup address: http://192.168.4.1<br>ESP-NOW continues independently.</small></p></main></body></html>
+)HTML";
+
+void initConfigPortal() {
+  configServer.on("/", HTTP_GET, []() {
+    configServer.send(200, "text/html; charset=utf-8", portalHtml);
+  });
+
+  configServer.on("/save", HTTP_POST, []() {
+    String ssid = configServer.arg("ssid");
+    String password = configServer.arg("password");
+    ssid.trim();
+    if (ssid.isEmpty() || ssid.length() > 32 || password.length() > 63 ||
+        (password.length() != 0 && password.length() < 8)) {
+      configServer.send(400, "text/plain", "Invalid Wi-Fi name or password length");
+      return;
     }
-    vTaskDelay(pdMS_TO_TICKS(10000));
+
+    Preferences p;
+    if (!p.begin("sbwifi", false)) {
+      configServer.send(500, "text/plain", "Cannot save Wi-Fi settings");
+      return;
+    }
+    p.putString("ssid", ssid);
+    p.putString("password", password);
+    p.end();
+
+    // A worker initiates STA connection after this HTTP response, not here.
+    newCredentialsPending = true;
+    configServer.send(200, "text/html; charset=utf-8",
+       "<html><meta name='viewport' content='width=device-width'><body>"
+       "<h2>Saved!</h2><p>ESP32 is attempting to connect to Wi-Fi. "
+       "Keep the setup portal open for changes. See Serial Monitor for the result.</p>"
+       "<a href='/'>Back</a></body></html>");
+    Serial.printf("[WIFI] Credentials saved for SSID %s\n", ssid.c_str());
+  });
+
+  configServer.on("/status", HTTP_GET, []() {
+    String body = String("{\"connected\":") +
+         (WiFi.status() == WL_CONNECTED ? "true" : "false") +
+         ",\"ip\":\"" + WiFi.localIP().toString() +
+         "\",\"channel\":" + String(WiFi.channel()) + "}";
+    configServer.send(200, "application/json", body);
+  });
+  configServer.onNotFound([]() {
+    configServer.sendHeader("Location", "http://192.168.4.1/");
+    configServer.send(302, "text/plain", "Redirecting to setup portal");
+  });
+
+  configServer.begin();
+  captiveDns.start(53, "*", WiFi.softAPIP());
+  configPortalActive = true;
+  Serial.println("[SETUP] Portal running at http://192.168.4.1");
+}
+
+void initWiFi() {
+  Serial.println("[BOOT 1/4] Starting native Wi-Fi (no WiFiManager)...");
+  // Wi-Fi AP+STA allows setup and router connection on the same radio.
+  // Connected STA determines the ESP-NOW channel; do not force a channel.
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.setSleep(false);
+  WiFi.setAutoReconnect(false); // manual, bounded 15-second retries
+
+  bool apOK = WiFi.softAP(SETUP_AP_SSID, SETUP_AP_PASSWORD);
+  Serial.printf("[SETUP] Hotspot: %s / %s | %s\n",
+                SETUP_AP_SSID, SETUP_AP_PASSWORD,
+                apOK ? "ACTIVE" : "FAILED");
+  if (apOK) {
+    Serial.printf("[SETUP] Connect phone then open http://%s\n",
+                  WiFi.softAPIP().toString().c_str());
+    initConfigPortal();
+  }
+
+  startSavedWiFi();
+  // No blocking Wi-Fi autoConnect: setup must reach ESP-NOW and sensors.
+  Serial.printf("[WIFI] STA MAC=%s\n", WiFi.macAddress().c_str());
+}
+
+// =======================================
+// WIFI STATUS TASK
+// =======================================
+
+void WiFiTask(void* parameter) {
+  bool previous = WiFi.status() == WL_CONNECTED;
+  uint32_t lastReport = 0;
+  uint32_t lastAttempt = millis();
+
+  while (true) {
+    uint32_t now = millis();
+    bool connected = WiFi.status() == WL_CONNECTED;
+    updateWiFiLED();
+
+    if (forgetCredentialsPending) {
+      forgetCredentialsPending = false;
+      Preferences p;
+      if (p.begin("sbwifi", false)) {
+        p.clear();
+        p.end();
+      }
+      WiFi.disconnect(false, true);
+      Serial.println("[WIFI] Saved Wi-Fi erased (portal still active). No restart.");
+      lastAttempt = now;
+    } else if (newCredentialsPending) {
+      newCredentialsPending = false;
+      startSavedWiFi();
+      lastAttempt = millis();
+    } else if (!connected && hasSavedWiFi() &&
+               (uint32_t)(now - lastAttempt) >= 15000UL) {
+      Serial.println("[WIFI] Offline; retrying saved Wi-Fi without reboot...");
+      startSavedWiFi();
+      lastAttempt = millis();
+    }
+
+    connected = WiFi.status() == WL_CONNECTED;
+    if (connected != previous) {
+      Serial.printf("[WIFI] %s\n", connected ? "CONNECTED" : "DISCONNECTED");
+      if (connected) {
+        Serial.printf("[WIFI] Router IP=%s | channel=%d\n",
+                      WiFi.localIP().toString().c_str(), WiFi.channel());
+        Serial.println("[ESP-NOW] Receiver must be on router's channel");
+      }
+      lastReport = 0;
+    }
+    if (connected && (lastReport == 0 || (uint32_t)(now - lastReport) >= 60000UL)) {
+      Serial.printf("[WIFI] ONLINE | IP=%s | RSSI=%d dBm | channel=%d\n",
+                    WiFi.localIP().toString().c_str(), WiFi.RSSI(), WiFi.channel());
+      lastReport = now;
+    }
+
+    previous = connected;
+    vTaskDelay(pdMS_TO_TICKS(1000));
   }
 }
+
+// =======================================
+// MPU6050: optional and fault-tolerant
+// =======================================
+
+bool initializeMPU() {
+  Serial.println("[MPU] Checking I2C on SDA=21 SCL=22...");
+
+  if (!Wire.begin(MPU_SDA, MPU_SCL)) {
+    Serial.println("[MPU] Wire.begin failed; verify ESP32 and GPIO wiring");
+    return false;
+  }
+
+  Wire.setClock(100000);  // Prefer 100 kHz over 400 kHz for long test wires
+  Wire.setTimeOut(25);    // Do not block boot on an unresponsive I2C bus
+
+  // A healthy I2C bus should idle HIGH on both lines.
+  if (digitalRead(MPU_SDA) == LOW || digitalRead(MPU_SCL) == LOW) {
+    Serial.printf("[MPU] I2C BUS STUCK LOW: SDA=%d SCL=%d\n",
+                  digitalRead(MPU_SDA), digitalRead(MPU_SCL));
+    Serial.println("[MPU] Check swapped wires, 3.3V power and SDA/SCL pull-ups");
+    Wire.end();
+    return false;
+  }
+
+  uint8_t address = 0;
+  Wire.beginTransmission(0x68);
+  if (Wire.endTransmission() == 0) {
+    address = 0x68;
+  } else {
+    Wire.beginTransmission(0x69);
+    if (Wire.endTransmission() == 0) address = 0x69;
+  }
+
+  if (address == 0) {
+    Serial.println("[MPU] No response at I2C 0x68 or 0x69");
+    Serial.println("[MPU] WiFi + ESP-NOW will CONTINUE; ball counting disabled");
+    Wire.end();
+    return false;
+  }
+
+  Serial.printf("[MPU] Found I2C device at 0x%02X; initializing...\n", address);
+  if (!mpu.begin(address, &Wire)) {
+    Serial.println("[MPU] Device ACKed but MPU6050 initialization failed");
+    Serial.println("[MPU] Confirm sensor type (WHO_AM_I), power and wiring");
+    Wire.end();
+    return false;
+  }
+
+  mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
+  mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+  mpu.setFilterBandwidth(MPU6050_BAND_44_HZ);
+
+  Serial.printf("[MPU] CONNECTED on 0x%02X\n", address);
+  return true;
+}
+
+// =======================================
+// SETUP (WiFi -> ESP-NOW -> MPU -> Tasks)
+// =======================================
 
 void setup() {
   Serial.begin(115200);
-  delay(500);
+  delay(350);
+  ++bootCount;
+  Serial.printf("[BOOT] Restart count=%lu | previous phase=%lu | reset reason=%d\n",
+                (unsigned long)bootCount, (unsigned long)lastBootStage,
+                (int)esp_reset_reason());
+  lastBootStage = 0;
+
+  Serial.println();
+  Serial.println("================================");
+  Serial.println(" SMART BILLIARD ESP32 SENDER");
+  Serial.println(" IR + MPU6050 + BUZZER");
+  Serial.println(" Firmware 1.4.2 (WiFiManager-free)");
+  Serial.println("================================");
+
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   pinMode(IR_RX, INPUT_PULLUP);
-  ledcAttach(IR_TX, 38000, 8);
+  pinMode(WIFI_LED, OUTPUT);
+  digitalWrite(WIFI_LED, WIFI_LED_OFF);
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, BUZZER_OFF);
+
+  if (!ledcAttach(IR_TX, 38000, 8)) {
+    Serial.println("[IR] PWM initialization FAILED");
+  }
   ledcWrite(IR_TX, 0);
+
   loadSecret();
 
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);
-  esp_wifi_set_ps(WIFI_PS_NONE);
-  WiFiManager wm;
-  wm.setConfigPortalTimeout(180);
-  if (!wm.autoConnect("Billiard-Setup", "12345678")) {
-    Serial.println("[WIFI] No Wi-Fi. ESP-NOW still starts.");
+  // 1) Start Wi-Fi AP+STA (without WiFiManager and without reboot-on-failure).
+  lastBootStage = 1;
+  initWiFi();
+  updateWiFiLED();
+
+  // 2) Initialize ESP-NOW on the current Wi-Fi channel.
+  lastBootStage = 2;
+  Serial.println("[BOOT 2/4] Starting ESP-NOW...");
+  if (esp_now_init() == ESP_OK) {
+    esp_now_register_send_cb(OnDataSent);
+    memset(&peerInfo, 0, sizeof(peerInfo));
+    memcpy(peerInfo.peer_addr, receiverAddress, 6);
+    peerInfo.channel = 0; // use the sender's current WiFi channel
+    peerInfo.ifidx = WIFI_IF_STA;
+    peerInfo.encrypt = false;
+
+    esp_err_t addResult = esp_now_add_peer(&peerInfo);
+    if (addResult == ESP_OK || addResult == ESP_ERR_ESPNOW_EXIST) {
+      espNowReady = true;
+      Serial.printf("[ESP-NOW] READY | receiver=%02X:%02X:%02X:%02X:%02X:%02X | channel=%d\n",
+                    receiverAddress[0], receiverAddress[1], receiverAddress[2],
+                    receiverAddress[3], receiverAddress[4], receiverAddress[5],
+                    WiFi.channel());
+      Serial.println("[ESP-NOW] Receiver MUST listen on this same channel");
+    } else {
+      Serial.printf("[ESP-NOW] PEER FAILED: %s\n", esp_err_to_name(addResult));
+    }
   } else {
-    Serial.print("[WIFI] Connected: ");
-    Serial.println(WiFi.localIP());
-  }
-  Serial.print("[SYSTEM] MAC: ");
-  Serial.println(WiFi.macAddress());
-
-  if (esp_now_init() != ESP_OK) {
-    Serial.println("[ESP-NOW] init failed");
-    return;
-  }
-  esp_now_register_send_cb(OnDataSent);
-  memset(&peerInfo, 0, sizeof(peerInfo));
-  memcpy(peerInfo.peer_addr, receiverAddress, 6);
-  peerInfo.channel = 0;
-  peerInfo.encrypt = false;
-  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
-    Serial.println("[ESP-NOW] peer failed");
-    return;
-  }
-  esp_wifi_set_ps(WIFI_PS_NONE);
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[WIFI] Reconnecting after ESP-NOW");
-    WiFi.reconnect();
-    delay(2000);
+    Serial.println("[ESP-NOW] initialization FAILED");
   }
 
+  // 3) Check the MPU only AFTER network setup. Never halt in a fatal loop.
+  lastBootStage = 3;
+  Serial.println("[BOOT 3/4] Checking optional MPU6050...");
+  mpuReady = initializeMPU();
+  if (!mpuReady) {
+    Serial.println("[MPU] SENSOR OFFLINE. Please fix wiring, then restart ESP32.");
+    Serial.println("[MPU] IR+MPU ball counting is DISABLED to avoid false counts.");
+  }
+
+  // 4) Create workers. Network and button still work when MPU is missing.
+  lastBootStage = 4;
+  Serial.println("[BOOT 4/4] Starting workers...");
   radioMutex = xSemaphoreCreateMutex();
   apiQueue = xQueueCreate(20, sizeof(APIEvent));
+  if (!radioMutex || !apiQueue) {
+    Serial.println("[FATAL] FreeRTOS allocation failed");
+    return;
+  }
+
   xTaskCreatePinnedToCore(ButtonTask, "ButtonTask", 4096, NULL, 3, NULL, 1);
-  xTaskCreatePinnedToCore(BeamTask, "BeamTask", 4096, NULL, 4, NULL, 1);
-  xTaskCreatePinnedToCore(APITask, "APITask", 32768, NULL, 1, NULL, 0);
+  if (mpuReady) {
+    xTaskCreatePinnedToCore(SensorTask, "SensorTask", 6144, NULL, 4, NULL, 1);
+  }
+  xTaskCreatePinnedToCore(AlarmTask, "AlarmTask", 3072, NULL, 2, NULL, 1);
+  xTaskCreatePinnedToCore(APITask, "APITask", 16384, NULL, 1, NULL, 0);
   xTaskCreatePinnedToCore(WiFiTask, "WiFiTask", 4096, NULL, 1, NULL, 0);
-  Serial.println("[SB] firmware 1.3.1");
-  Serial.println("[SYSTEM] READY");
-  Serial.println("[IR] Waiting for website timer...");
+
+  lastBootStage = 5;
+  Serial.println("================================");
+  Serial.println(" SMART BILLIARD SYSTEM READY");
+  Serial.printf(" WiFi: %s | ESP-NOW: %s | MPU6050: %s\n",
+                WiFi.status() == WL_CONNECTED ? "CONNECTED" : "OFFLINE",
+                espNowReady ? "READY" : "FAILED",
+                mpuReady ? "READY" : "DISCONNECTED");
+  Serial.println(" Button=27 IR_TX=26 IR_RX=25 SDA=21 SCL=22 Buzzer=33 LED=2");
+  Serial.printf(" Ball target=%lu | threshold=%.2f m/s2 | alarm=%lu ms\n",
+                (unsigned long)BALL_TARGET, IMPACT_THRESHOLD,
+                (unsigned long)ALARM_IDLE_TIMEOUT_MS);
+  Serial.println(" [SERIAL] S=start R=reset X=stop A=alarm M=mute P=status W=forgetWiFi");
+  Serial.println("================================");
 }
 
+// =======================================
+// MAIN LOOP
+// =======================================
+
 void loop() {
-  vTaskDelay(pdMS_TO_TICKS(1000));
+
+  // Keep the setup portal available, including without internet.
+  if (configPortalActive) {
+    captiveDns.processNextRequest();
+    configServer.handleClient();
+  }
+
+  // Serial testing commands
+  if (Serial.available()) {
+
+    char c = Serial.read();
+
+    // Start counting
+    if (c == 'S' || c == 's') {
+
+      startBallCounter(true);
+    }
+
+    // Reset count
+    if (c == 'R' || c == 'r') {
+
+      resetBallCounter();
+    }
+
+    // Stop counting
+    if (c == 'X' || c == 'x') {
+
+      stopBallCounter(false);
+    }
+
+    // Force alarm
+    if (c == 'A' || c == 'a') {
+
+      startBallCounter(false);
+
+      setAlarmForced(true);
+    }
+
+    // Mute alarm
+    if (c == 'M' || c == 'm') {
+
+      setAlarmForced(false);
+    }
+
+    // Print status
+    if (c == 'P' || c == 'p') {
+      CounterSnapshot s = snapshotCounter();
+      Serial.printf("[STATUS] WiFi=%s IP=%s CH=%d ESP-NOW=%s MPU=%s Active=%s Balls=%lu/%lu\n",
+                    WiFi.status() == WL_CONNECTED ? "ONLINE" : "OFFLINE",
+                    WiFi.localIP().toString().c_str(), WiFi.channel(),
+                    espNowReady ? "READY" : "OFFLINE",
+                    mpuReady ? "READY" : "DISCONNECTED",
+                    s.active ? "YES" : "NO",
+                    (unsigned long)s.count, (unsigned long)BALL_TARGET);
+    }
+
+    // Erase settings WITHOUT software-restarting the ESP32.
+    if (c == 'W' || c == 'w') {
+      Serial.println("[WIFI] Forget requested. Wi-Fi credentials will be erased.");
+      forgetCredentialsPending = true;
+    }
+  }
+
+  vTaskDelay(pdMS_TO_TICKS(20));
 }

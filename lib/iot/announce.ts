@@ -4,6 +4,7 @@ import { applyHeartbeat } from "@/lib/iot/heartbeat";
 import { nextPendingCommand } from "@/lib/iot/commands";
 import { hashSecret, verifySecret } from "@/lib/auth/password";
 import { generateSecret } from "@/lib/utils";
+import { getSettings } from "@/models/SystemSettings";
 import type { BoxStatus } from "@/types";
 
 export function normalizeDeviceId(raw: string) {
@@ -59,7 +60,22 @@ export async function announceDevice(input: {
       type: "ENROLLED",
       message: "Device enrolled from ESP32",
     });
-  } else if (!input.token || !(await verifySecret(input.token, device.secretHash))) {
+  } else if (!input.token) {
+    const settings = await getSettings();
+    const cutoff = Date.now() - settings.heartbeatTimeoutSeconds * 1000;
+    const seen = device.lastHeartbeat?.getTime() ?? 0;
+    if (device.status === "ONLINE" && seen >= cutoff) {
+      throw new Error("UNAUTHORIZED");
+    }
+    secret = generateSecret(32);
+    device.secretHash = await hashSecret(secret);
+    await device.save();
+    await DeviceLog.create({
+      deviceId,
+      type: "REENROLLED",
+      message: "Secret reissued because the device enrolled with no token",
+    });
+  } else if (!(await verifySecret(input.token, device.secretHash))) {
     throw new Error("UNAUTHORIZED");
   }
 

@@ -167,6 +167,7 @@ DNSServer captiveDns;
 bool configPortalActive = false;
 volatile bool newCredentialsPending = false;
 volatile bool forgetCredentialsPending = false;
+volatile bool wifiScanActive = false;
 
 // RTC memory survives software reset and helps distinguish a reboot loop.
 RTC_DATA_ATTR uint32_t bootCount = 0;
@@ -214,6 +215,9 @@ bool irEnabled = true;
 bool vibrationEnabled = true;
 bool irHitPending = false;
 bool vibrationHitPending = false;
+bool irDetectedNow = false;
+bool irSeenSinceReport = false;
+uint32_t vibrationCount = 0;
 
 bool irSensorEnabled() {
   portENTER_CRITICAL(&stateMux);
@@ -239,8 +243,37 @@ void setIrSensorEnabled(bool on) {
 void setVibrationSensorEnabled(bool on) {
   portENTER_CRITICAL(&stateMux);
   vibrationEnabled = on;
+  if (on) vibrationCount = 0;
   portEXIT_CRITICAL(&stateMux);
   Serial.printf("[SENSOR] VIBRATION %s\n", on ? "ON" : "OFF");
+}
+
+void noteIrSample(bool blocked) {
+  portENTER_CRITICAL(&stateMux);
+  irDetectedNow = blocked;
+  if (blocked) irSeenSinceReport = true;
+  portEXIT_CRITICAL(&stateMux);
+}
+
+bool takeIrDetected() {
+  portENTER_CRITICAL(&stateMux);
+  bool value = irDetectedNow || irSeenSinceReport;
+  irSeenSinceReport = false;
+  portEXIT_CRITICAL(&stateMux);
+  return value;
+}
+
+void noteVibration() {
+  portENTER_CRITICAL(&stateMux);
+  if (vibrationCount < 1000000) vibrationCount++;
+  portEXIT_CRITICAL(&stateMux);
+}
+
+uint32_t currentVibrationCount() {
+  portENTER_CRITICAL(&stateMux);
+  uint32_t value = vibrationCount;
+  portEXIT_CRITICAL(&stateMux);
+  return value;
 }
 
 void markIrHit() {
@@ -1110,12 +1143,20 @@ void heartbeat() {
   bool vibrationOn = vibrationSensorEnabled();
   bool irHit = takeIrHit();
   bool vibrationHit = takeVibrationHit();
+  bool irDetected = takeIrDetected();
+  uint32_t vibCount = currentVibrationCount();
 
   body += "\"irEnabled\":" +
     String(irOn ? "true" : "false") + ",";
 
   body += "\"vibrationEnabled\":" +
     String(vibrationOn ? "true" : "false") + ",";
+
+  body += "\"irDetected\":" +
+    String(irDetected ? "true" : "false") + ",";
+
+  body += "\"vibrationCount\":" +
+    String(vibCount) + ",";
 
   body += "\"irHit\":" +
     String(irHit ? "true" : "false") + ",";
@@ -1429,7 +1470,8 @@ void SensorTask(void* parameter) {
 
     previousImpactHigh = impactHigh;
 
-    if (newImpact && useIr) {
+    if (newImpact) {
+      noteVibration();
       markVibrationHit();
     }
 
@@ -1446,6 +1488,7 @@ void SensorTask(void* parameter) {
       blockedSamples = 0;
       clearSamples = 0;
       waitingForImpact = false;
+      noteIrSample(false);
 
     } else {
 
@@ -1481,6 +1524,7 @@ void SensorTask(void* parameter) {
       }
     }
 
+      noteIrSample(blocked);
     }
 
     // ===================================
@@ -1693,7 +1737,9 @@ void APITask(void* parameter) {
     // Poll faster while the door is open so CLOSE_BOX is not
     // stuck behind the idle 4 second heartbeat.
     uint32_t heartbeatInterval =
-      (s.active || snapshotDoorOpen()) ? 1000UL : 4000UL;
+      (s.active || snapshotDoorOpen() || irSensorEnabled() || vibrationSensorEnabled())
+        ? 1000UL
+        : 4000UL;
 
     if (
       deviceSecret.length() &&
@@ -1747,25 +1793,127 @@ void startSavedWiFi() {
 }
 
 const char* portalHtml = R"HTML(
-<!DOCTYPE html><html lang="en"><head><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta charset="utf-8"><title>Smart Billiard Wi-Fi Setup</title>
+<!DOCTYPE html><html lang="mn"><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="utf-8"><title>Smart Billiard Wi-Fi</title>
 <style>body{font-family:system-ui,sans-serif;background:#101822;color:white;max-width:450px;margin:5vh auto;padding:20px}
 main{background:#1c2838;padding:25px;border-radius:16px}label{display:block;margin:15px 0 5px}
-input{box-sizing:border-box;width:100%;padding:12px;border-radius:8px;border:0;font-size:16px}
-button{background:#1c9bff;color:white;border:0;padding:13px 20px;border-radius:8px;margin-top:20px;font-weight:bold}
+input,select{box-sizing:border-box;width:100%;padding:12px;border-radius:8px;border:0;font-size:16px}
+button{background:#1c9bff;color:white;border:0;padding:13px 20px;border-radius:8px;margin-top:12px;font-weight:bold}
+button.ghost{background:#2a3a4e;width:100%}
 small{color:#b1becd}</style></head><body><main><h2>Smart Billiard</h2>
-<p>Connect the sender ESP32 to your 2.4 GHz internet Wi-Fi.</p>
-<form method="POST" action="/save"><label>Wi-Fi name (SSID)</label>
-<input name="ssid" maxlength="32" required placeholder="Your 2.4 GHz Wi-Fi">
-<label>Wi-Fi password</label><input name="password" type="password" maxlength="63" placeholder="Wi-Fi password">
-<button type="submit">Save &amp; Connect</button></form>
+<p>Ойрхон 2.4 GHz сүлжээнээс сонгоно.</p>
+<form method="POST" action="/save" id="form">
+<label>Ойрхон Wi-Fi</label>
+<select id="nets" required></select>
+<button class="ghost" type="button" id="refresh">Сүлжээ шинэчлэх</button>
+<label>Нууц үг</label>
+<input name="password" type="password" maxlength="63" placeholder="Wi-Fi нууц үг">
+<input type="hidden" name="ssid" id="ssid">
+<button type="submit">Хадгалаад холбох</button></form>
 <p><small>Setup AP: Billiard-Setup / 12345678<br>
-Setup address: http://192.168.4.1<br>ESP-NOW continues independently.</small></p></main></body></html>
+Setup address: http://192.168.4.1</small></p></main>
+<script>
+const nets=document.getElementById('nets');
+const ssid=document.getElementById('ssid');
+function fill(list){
+  nets.innerHTML='';
+  if(!list.length){
+    const o=document.createElement('option');
+    o.value='';
+    o.textContent='Сүлжээ олдсонгүй';
+    nets.appendChild(o);
+    return;
+  }
+  list.forEach(function(n){
+    const o=document.createElement('option');
+    o.value=n.ssid;
+    o.textContent=n.ssid+'  '+n.rssi+' dBm'+(n.secure?'  түгжээтэй':'');
+    nets.appendChild(o);
+  });
+}
+async function loadNets(){
+  nets.innerHTML='';
+  const wait=document.createElement('option');
+  wait.textContent='Хайж байна...';
+  nets.appendChild(wait);
+  try{
+    const res=await fetch('/scan');
+    fill(await res.json());
+  }catch(e){
+    fill([]);
+  }
+}
+document.getElementById('refresh').onclick=loadNets;
+document.getElementById('form').onsubmit=function(){
+  ssid.value=nets.value;
+  if(!ssid.value){return false;}
+};
+loadNets();
+</script>
+</body></html>
 )HTML";
+
+String jsonEscape(const String& in) {
+  String out;
+  out.reserve(in.length() + 4);
+  for (unsigned i = 0; i < in.length(); i++) {
+    char c = in[i];
+    if (c == '"' || c == '\\') out += '\\';
+    if (c >= 32) out += c;
+  }
+  return out;
+}
+
+void handleWifiScan() {
+  if (wifiScanActive) {
+    configServer.send(200, "application/json", "[]");
+    return;
+  }
+
+  wifiScanActive = true;
+  Serial.println("[WIFI] Scanning nearby networks");
+  int found = WiFi.scanNetworks(false, false, false, 120);
+  String json = "[";
+  int shown = 0;
+
+  if (found > 0) {
+    for (int i = 0; i < found && shown < 15; i++) {
+      String ssid = WiFi.SSID(i);
+      ssid.trim();
+      if (!ssid.length()) continue;
+
+      bool duplicate = false;
+      for (int j = 0; j < i; j++) {
+        if (WiFi.SSID(j) == ssid) {
+          duplicate = true;
+          break;
+        }
+      }
+      if (duplicate) continue;
+
+      if (shown) json += ",";
+      bool open = WiFi.encryptionType(i) == WIFI_AUTH_OPEN;
+      json += "{\"ssid\":\"" + jsonEscape(ssid) +
+        "\",\"rssi\":" + String(WiFi.RSSI(i)) +
+        ",\"secure\":" + (open ? "false" : "true") + "}";
+      shown++;
+    }
+  }
+
+  json += "]";
+  WiFi.scanDelete();
+  wifiScanActive = false;
+  Serial.printf("[WIFI] Scan found %d networks\n", shown);
+  configServer.send(200, "application/json", json);
+}
 
 void initConfigPortal() {
   configServer.on("/", HTTP_GET, []() {
     configServer.send(200, "text/html; charset=utf-8", portalHtml);
+  });
+
+  configServer.on("/scan", HTTP_GET, []() {
+    handleWifiScan();
   });
 
   configServer.on("/save", HTTP_POST, []() {
@@ -1853,7 +2001,9 @@ void WiFiTask(void* parameter) {
     bool connected = WiFi.status() == WL_CONNECTED;
     updateWiFiLED();
 
-    if (forgetCredentialsPending) {
+    if (wifiScanActive) {
+      // Leave the radio alone while the portal lists nearby networks.
+    } else if (forgetCredentialsPending) {
       forgetCredentialsPending = false;
       Preferences p;
       if (p.begin("sbwifi", false)) {

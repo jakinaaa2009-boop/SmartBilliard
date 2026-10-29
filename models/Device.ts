@@ -24,6 +24,8 @@ export interface DeviceDocument {
   vibrationEnabled: boolean;
   sensorTestActive: boolean;
   mpuReady?: boolean;
+  irDetected: boolean;
+  vibrationCount: number;
   lastIrAt?: Date;
   lastVibrationAt?: Date;
   createdAt: Date;
@@ -71,6 +73,8 @@ const DeviceSchema = new Schema<DeviceDocument>(
     vibrationEnabled: { type: Boolean, default: true },
     sensorTestActive: { type: Boolean, default: false },
     mpuReady: Boolean,
+    irDetected: { type: Boolean, default: false },
+    vibrationCount: { type: Number, default: 0 },
     lastIrAt: Date,
     lastVibrationAt: Date,
   },

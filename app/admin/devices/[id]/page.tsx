@@ -34,8 +34,8 @@ interface DeviceDetail {
     vibrationEnabled?: boolean;
     sensorTestActive?: boolean;
     mpuReady?: boolean;
-    lastIrAt?: string;
-    lastVibrationAt?: string;
+    irDetected?: boolean;
+    vibrationCount?: number;
   };
   commands: { command: string; status: string; createdAt: string; commandId?: string }[];
 }
@@ -214,14 +214,13 @@ export default function DeviceDetailPage() {
         <div className="rounded-2xl border border-border bg-card p-6">
           <h2 className="font-medium">Мэдрэгч туршилт</h2>
           <p className="mt-1 text-sm text-muted-foreground">
-            Нэгийг нь унтраагаад нөгөөгөөр нь туршина. Хоёуланг асаавал бөмбөг зөвхөн IR ба доргилт зэрэг ирэхэд тоологдоно.
-            Ногоон «сая ажиллалаа» гарвал тэр мэдрэгч дохио өгсөн.
+            IR туяа мэдэрвэл true, мэдрэхгүй бол false. Доргилт мэдрэгдэх бүрт тоо 1, 2, 3 гэж өснө.
           </p>
           <SensorRow
             title="IR туяа"
             enabled={d.irEnabled !== false}
-            detail={hitText(data.device.lastIrAt, now)}
-            live={isRecent(data.device.lastIrAt, now)}
+            status={data.device.irDetected ? "true" : "false"}
+            live={data.device.irDetected === true}
             busy={busy}
             onEnable={() => void sensorCommand("ir-on")}
             onDisable={() => void sensorCommand("ir-off")}
@@ -229,12 +228,8 @@ export default function DeviceDetailPage() {
           <SensorRow
             title="Доргилт (MPU)"
             enabled={d.vibrationEnabled !== false}
-            detail={
-              data.device.mpuReady === false
-                ? "MPU холбогдоогүй"
-                : hitText(data.device.lastVibrationAt, now)
-            }
-            live={data.device.mpuReady !== false && isRecent(data.device.lastVibrationAt, now)}
+            status={String(data.device.vibrationCount ?? 0)}
+            live={(data.device.vibrationCount ?? 0) > 0}
             busy={busy}
             onEnable={() => void sensorCommand("vibration-on")}
             onDisable={() => void sensorCommand("vibration-off")}
@@ -309,21 +304,10 @@ export default function DeviceDetailPage() {
   );
 }
 
-function isRecent(at: string | undefined, now: number) {
-  if (!at) return false;
-  return now - new Date(at).getTime() < 8000;
-}
-
-function hitText(at: string | undefined, now: number) {
-  if (!at) return "Одоогоор дохио алга";
-  if (isRecent(at, now)) return "Сая ажиллалаа";
-  return `Сүүлд ${relativeTime(at)}`;
-}
-
 function SensorRow({
   title,
   enabled,
-  detail,
+  status,
   live,
   busy,
   onEnable,
@@ -331,7 +315,7 @@ function SensorRow({
 }: {
   title: string;
   enabled: boolean;
-  detail: string;
+  status: string;
   live: boolean;
   busy: boolean;
   onEnable: () => void;
@@ -345,7 +329,9 @@ function SensorRow({
           {enabled ? "Асаалттай" : "Унтраалттай"}
         </span>
       </div>
-      <p className={`mt-1 text-sm ${live ? "font-medium text-primary" : "text-muted-foreground"}`}>{detail}</p>
+      <p className={`mt-2 font-mono text-3xl font-semibold ${live ? "text-primary" : "text-muted-foreground"}`}>
+        {status}
+      </p>
       <div className="mt-3 grid grid-cols-2 gap-2">
         <Button size="sm" disabled={busy || enabled} onClick={onEnable}>
           Асаах

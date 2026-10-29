@@ -17,6 +17,8 @@ export async function applyHeartbeat(input: {
   countEvent?: boolean;
   irHit?: boolean;
   vibrationHit?: boolean;
+  irDetected?: boolean;
+  vibrationCount?: number;
   mpuReady?: boolean;
   alarmStatus?: boolean;
   firmwareVersion?: string;
@@ -51,6 +53,10 @@ export async function applyHeartbeat(input: {
   } else if (liveCount) {
     const incoming = input.detectedBallCount as number;
     device.detectedBallCount = Math.max(device.detectedBallCount || 0, incoming);
+  }
+  if (typeof input.irDetected === "boolean") device.irDetected = input.irDetected;
+  if (typeof input.vibrationCount === "number" && Number.isFinite(input.vibrationCount)) {
+    device.vibrationCount = Math.max(0, Math.floor(input.vibrationCount));
   }
   if (input.irHit) device.lastIrAt = new Date();
   if (input.vibrationHit) device.lastVibrationAt = new Date();

@@ -28,6 +28,8 @@ export async function POST(request: NextRequest) {
       ballCounterActive?: boolean;
       irHit?: boolean;
       vibrationHit?: boolean;
+      irDetected?: boolean;
+      vibrationCount?: number;
       mpuReady?: boolean;
       action?: string;
       eventType?: number;
@@ -46,6 +48,8 @@ export async function POST(request: NextRequest) {
       ballCounterActive: body.ballCounterActive,
       irHit: body.irHit,
       vibrationHit: body.vibrationHit,
+      irDetected: body.irDetected,
+      vibrationCount: body.vibrationCount,
       mpuReady: body.mpuReady,
       action: body.action,
       eventType: body.eventType,

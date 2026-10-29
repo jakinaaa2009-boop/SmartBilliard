@@ -83,11 +83,11 @@ const char* DEVICE_SECRET_OVERRIDE = "";
 // Required balls
 const uint32_t BALL_TARGET = 12;
 
-// MPU vibration sensitivity (m/s2)
-const float IMPACT_THRESHOLD = 1.70f;
+// MPU vibration sensitivity (m/s2). A ball tap is a short spike.
+const float IMPACT_THRESHOLD = 0.80f;
 
-// Gravity baseline adaptation
-const float BASELINE_ALPHA = 0.008f;
+// Gravity baseline adaptation. Slow, so a hit is not absorbed.
+const float BASELINE_ALPHA = 0.003f;
 
 // Time to detect MPU after IR (ms)
 const uint32_t IMPACT_WINDOW_MS = 1800;
@@ -121,6 +121,12 @@ const uint32_t BEEP_OFF_MS = 650;
 // this must be adjusted.
 
 const int IR_RECEIVED_LEVEL = LOW;
+
+// 38 kHz is the usual receiver. Lowering it did not make the beam reliable.
+const uint32_t IR_CARRIER_HZ = 38000;
+
+// About 33% of 8-bit PWM. 50% duty holds the receiver in the blocked state.
+const uint8_t IR_DUTY = 85;
 
 // Require 3 detections from 4 samples
 const uint8_t IR_CARRIER_HITS_FOR_CLEAR = 3;
@@ -538,6 +544,24 @@ void startBallCounter(bool resetCounter) {
   );
 }
 
+// Turns counting on without changing the generation, so the
+// beam-then-vibration event in this same loop can still count.
+void armBallCounter() {
+
+  portENTER_CRITICAL(&stateMux);
+
+  if (!ballCounterActive) {
+    ballCounterActive = true;
+    ballCount = 0;
+    forceAlarm = false;
+    alarmMuted = false;
+    lastBallProgressMs = millis();
+    countDirty = true;
+  }
+
+  portEXIT_CRITICAL(&stateMux);
+}
+
 // =======================================
 // STOP BALL COUNTER
 // =======================================
@@ -704,10 +728,10 @@ bool sampleBeamBlocked() {
 
   for (uint8_t j = 0; j < 4; j++) {
 
-    // Send 38kHz IR
-    ledcWrite(IR_TX, 128);
+    // 38 kHz burst long enough for the receiver to answer
+    ledcWrite(IR_TX, IR_DUTY);
 
-    delayMicroseconds(450);
+    delayMicroseconds(800);
 
     if (
       digitalRead(IR_RX) == IR_RECEIVED_LEVEL
@@ -1335,6 +1359,8 @@ void SensorTask(void* parameter) {
 
   uint32_t lastStatus = 0;
 
+  uint32_t lastMpuRetry = 0;
+
   uint32_t seenGeneration = UINT32_MAX;
 
   float baseX = 0;
@@ -1410,9 +1436,15 @@ void SensorTask(void* parameter) {
       previousImpactHigh = false;
     }
 
+    if (!mpuReady && (uint32_t)(now - lastMpuRetry) >= 3000) {
+      lastMpuRetry = now;
+      Serial.println("[MPU] Retrying connection...");
+      mpuReady = initializeMPU();
+    }
+
     bool useIr = irSensorEnabled();
     bool useMpu = vibrationSensorEnabled() && mpuReady;
-    bool counting = s.active && s.count < BALL_TARGET;
+    bool counting = s.count < BALL_TARGET;
 
     // Both sensors off: do not emit IR or watch for vibration.
     if (!useIr && !useMpu) {
@@ -1435,24 +1467,39 @@ void SensorTask(void* parameter) {
     }
 
     float impact = 0.0f;
+    float accelX = 0.0f;
+    float accelY = 0.0f;
+    float accelZ = 0.0f;
 
     if (readingOK) {
 
-      float dx = a.acceleration.x - baseX;
-      float dy = a.acceleration.y - baseY;
-      float dz = a.acceleration.z - baseZ;
+      accelX = a.acceleration.x;
+      accelY = a.acceleration.y;
+      accelZ = a.acceleration.z;
 
-      // Dynamic acceleration magnitude
-      impact = sqrtf(
+      float dx = accelX - baseX;
+      float dy = accelY - baseY;
+      float dz = accelZ - baseZ;
+
+      float accelImpact = sqrtf(
         dx * dx +
         dy * dy +
         dz * dz
       );
 
-      // Update gravity baseline
-      baseX += BASELINE_ALPHA * dx;
-      baseY += BASELINE_ALPHA * dy;
-      baseZ += BASELINE_ALPHA * dz;
+      float gx = g.gyro.x;
+      float gy = g.gyro.y;
+      float gz = g.gyro.z;
+      float gyroImpact = sqrtf(gx * gx + gy * gy + gz * gz) * 4.0f;
+
+      impact = accelImpact > gyroImpact ? accelImpact : gyroImpact;
+
+      // Keep the gravity baseline still during a hit.
+      if (accelImpact < IMPACT_THRESHOLD) {
+        baseX += BASELINE_ALPHA * dx;
+        baseY += BASELINE_ALPHA * dy;
+        baseZ += BASELINE_ALPHA * dz;
+      }
     }
 
     // ===================================
@@ -1550,7 +1597,8 @@ void SensorTask(void* parameter) {
         "[IR] BEAM BLOCKED"
       );
 
-      if (!useMpu) {
+      // Vibration is switched off: IR alone is the test.
+      if (!vibrationSensorEnabled()) {
 
         if (counting && confirmBall(seenGeneration)) {
 
@@ -1560,6 +1608,12 @@ void SensorTask(void* parameter) {
             "[BALL] COUNTED BY IR"
           );
         }
+
+      } else if (!mpuReady) {
+
+        Serial.println(
+          "[BALL] Vibration sensor is not reading"
+        );
 
       } else {
 
@@ -1614,7 +1668,11 @@ void SensorTask(void* parameter) {
 
         markVibrationHit();
 
-        // Both sensors confirmed
+        // Beam was blocked, then vibration: one ball.
+        if (counting) {
+          armBallCounter();
+        }
+
         if (counting && confirmBall(seenGeneration)) {
 
           lastBallAt = now;
@@ -1647,12 +1705,15 @@ void SensorTask(void* parameter) {
         snapshotCounter();
 
       Serial.printf(
-        "[SENSOR] IR=%s | MPU=%.2f | "
-        "Threshold=%.2f | Balls=%lu/%lu | "
-        "Pending=%s\n",
+        "[SENSOR] IR=%s | MPU=%s %.2f | "
+        "ax=%.1f ay=%.1f az=%.1f | "
+        "Balls=%lu/%lu | Pending=%s\n",
         blocked ? "BLOCKED" : "CLEAR",
+        (mpuReady && readingOK) ? "OK" : "OFF",
         impact,
-        IMPACT_THRESHOLD,
+        accelX,
+        accelY,
+        accelZ,
         (unsigned long)live.count,
         (unsigned long)BALL_TARGET,
         waitingForImpact ? "YES" : "NO"
@@ -2060,7 +2121,11 @@ bool initializeMPU() {
   Wire.setClock(100000);  // Prefer 100 kHz over 400 kHz for long test wires
   Wire.setTimeOut(25);    // Do not block boot on an unresponsive I2C bus
 
-  // A healthy I2C bus should idle HIGH on both lines.
+  // A healthy I2C bus should idle HIGH. Recheck once; the first
+  // sample can be low while the lines are still rising.
+  if (digitalRead(MPU_SDA) == LOW || digitalRead(MPU_SCL) == LOW) {
+    delay(20);
+  }
   if (digitalRead(MPU_SDA) == LOW || digitalRead(MPU_SCL) == LOW) {
     Serial.printf("[MPU] I2C BUS STUCK LOW: SDA=%d SCL=%d\n",
                   digitalRead(MPU_SDA), digitalRead(MPU_SCL));
@@ -2128,7 +2193,7 @@ void setup() {
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, BUZZER_OFF);
 
-  if (!ledcAttach(IR_TX, 38000, 8)) {
+  if (!ledcAttach(IR_TX, IR_CARRIER_HZ, 8)) {
     Serial.println("[IR] PWM initialization FAILED");
   }
   ledcWrite(IR_TX, 0);

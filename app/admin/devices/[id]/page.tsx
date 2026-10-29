@@ -28,6 +28,14 @@ interface DeviceDetail {
     wifiRssi?: number;
     uptime?: number;
     operationalState?: string;
+    detectedBallCount?: number;
+    expectedBallCount?: number;
+    irEnabled?: boolean;
+    vibrationEnabled?: boolean;
+    sensorTestActive?: boolean;
+    mpuReady?: boolean;
+    lastIrAt?: string;
+    lastVibrationAt?: string;
   };
   commands: { command: string; status: string; createdAt: string; commandId?: string }[];
 }
@@ -46,6 +54,7 @@ export default function DeviceDetailPage() {
   const [error, setError] = useState("");
   const [confirm, setConfirm] = useState<null | "door-open" | "door-close" | "secret">(null);
   const [secret, setSecret] = useState("");
+  const [busy, setBusy] = useState(false);
   const [now, setNow] = useState(Date.now());
   const { byDeviceId, connected } = useAdminLive();
 
@@ -75,6 +84,32 @@ export default function DeviceDetailPage() {
     });
     toast.success(action === "door-open" ? "Хаалга нээх команд илгээгдлээ" : "Хаалга хаах команд илгээгдлээ");
     void load();
+  }
+
+  async function sensorCommand(
+    action: "ir-on" | "ir-off" | "vibration-on" | "vibration-off" | "count-start" | "count-stop"
+  ) {
+    const messages = {
+      "ir-on": "IR мэдрэгчийг асаалаа",
+      "ir-off": "IR мэдрэгчийг унтраалаа",
+      "vibration-on": "Доргилт мэдрэгчийг асаалаа",
+      "vibration-off": "Доргилт мэдрэгчийг унтраалаа",
+      "count-start": "Бөмбөг тооллогыг 0-ээс эхлүүллээ",
+      "count-stop": "Бөмбөг тооллогыг зогсоолоо",
+    };
+    setBusy(true);
+    try {
+      await api(`/api/admin/devices/${params.id}/command`, {
+        method: "POST",
+        body: JSON.stringify({ action }),
+      });
+      toast.success(messages[action]);
+      await load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Команд явсангүй");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function rotateSecret() {
@@ -175,6 +210,67 @@ export default function DeviceDetailPage() {
         </div>
       </div>
 
+      <div className="mt-4 grid gap-4 lg:grid-cols-2">
+        <div className="rounded-2xl border border-border bg-card p-6">
+          <h2 className="font-medium">Мэдрэгч туршилт</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Нэгийг нь унтраагаад нөгөөгөөр нь туршина. Хоёуланг асаавал бөмбөг зөвхөн IR ба доргилт зэрэг ирэхэд тоологдоно.
+            Ногоон «сая ажиллалаа» гарвал тэр мэдрэгч дохио өгсөн.
+          </p>
+          <SensorRow
+            title="IR туяа"
+            enabled={d.irEnabled !== false}
+            detail={hitText(data.device.lastIrAt, now)}
+            live={isRecent(data.device.lastIrAt, now)}
+            busy={busy}
+            onEnable={() => void sensorCommand("ir-on")}
+            onDisable={() => void sensorCommand("ir-off")}
+          />
+          <SensorRow
+            title="Доргилт (MPU)"
+            enabled={d.vibrationEnabled !== false}
+            detail={
+              data.device.mpuReady === false
+                ? "MPU холбогдоогүй"
+                : hitText(data.device.lastVibrationAt, now)
+            }
+            live={data.device.mpuReady !== false && isRecent(data.device.lastVibrationAt, now)}
+            busy={busy}
+            onEnable={() => void sensorCommand("vibration-on")}
+            onDisable={() => void sensorCommand("vibration-off")}
+          />
+        </div>
+
+        <div className="rounded-2xl border border-border bg-card p-6">
+          <h2 className="font-medium">Бөмбөг тоолох тест</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            0-ээс эхлүүлнэ. Бөмбөг оруулахад тоо өсвөл сонгосон мэдрэгч тоолж байна. Өсөхгүй бол тэр мэдрэгч ажиллахгүй байна.
+          </p>
+          <p className="mt-4 font-mono text-5xl font-semibold tracking-tight">
+            {data.device.detectedBallCount ?? 0}
+          </p>
+          <p className="text-sm text-muted-foreground">Тоологдсон бөмбөг</p>
+          <p className="mt-2 text-sm">
+            {data.device.sensorTestActive ? (
+              <span className="inline-flex items-center gap-1.5 font-medium text-primary">
+                <span className="h-2 w-2 rounded-full bg-primary animate-pulseDot" />
+                Тест тоолж байна
+              </span>
+            ) : (
+              <span className="text-muted-foreground">Тест зогссон. Тоо өөрчлөгдөхгүй.</span>
+            )}
+          </p>
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <Button disabled={busy} onClick={() => void sensorCommand("count-start")}>
+              0-ээс тоолох
+            </Button>
+            <Button disabled={busy} variant="secondary" onClick={() => void sensorCommand("count-stop")}>
+              Зогсоох
+            </Button>
+          </div>
+        </div>
+      </div>
+
       <div className="mt-4 rounded-2xl border border-border bg-card p-6">
         <h2 className="mb-3 font-medium">Сүүлийн командууд</h2>
         {data.commands?.length ? (
@@ -209,6 +305,55 @@ export default function DeviceDetailPage() {
         danger
         onConfirm={() => void rotateSecret()}
       />
+    </div>
+  );
+}
+
+function isRecent(at: string | undefined, now: number) {
+  if (!at) return false;
+  return now - new Date(at).getTime() < 8000;
+}
+
+function hitText(at: string | undefined, now: number) {
+  if (!at) return "Одоогоор дохио алга";
+  if (isRecent(at, now)) return "Сая ажиллалаа";
+  return `Сүүлд ${relativeTime(at)}`;
+}
+
+function SensorRow({
+  title,
+  enabled,
+  detail,
+  live,
+  busy,
+  onEnable,
+  onDisable,
+}: {
+  title: string;
+  enabled: boolean;
+  detail: string;
+  live: boolean;
+  busy: boolean;
+  onEnable: () => void;
+  onDisable: () => void;
+}) {
+  return (
+    <div className="mt-4 rounded-xl border border-border p-4">
+      <div className="flex items-center justify-between gap-3">
+        <p className="font-medium">{title}</p>
+        <span className={enabled ? "text-sm text-primary" : "text-sm text-muted-foreground"}>
+          {enabled ? "Асаалттай" : "Унтраалттай"}
+        </span>
+      </div>
+      <p className={`mt-1 text-sm ${live ? "font-medium text-primary" : "text-muted-foreground"}`}>{detail}</p>
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        <Button size="sm" disabled={busy || enabled} onClick={onEnable}>
+          Асаах
+        </Button>
+        <Button size="sm" variant="secondary" disabled={busy || !enabled} onClick={onDisable}>
+          Унтраах
+        </Button>
+      </div>
     </div>
   );
 }

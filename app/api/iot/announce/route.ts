@@ -26,6 +26,9 @@ export async function POST(request: NextRequest) {
       boxStatus?: BoxStatus;
       ballCount?: number;
       ballCounterActive?: boolean;
+      irHit?: boolean;
+      vibrationHit?: boolean;
+      mpuReady?: boolean;
       action?: string;
       eventType?: number;
       value?: number;
@@ -41,6 +44,9 @@ export async function POST(request: NextRequest) {
       boxStatus: body.boxStatus,
       ballCount: body.ballCount,
       ballCounterActive: body.ballCounterActive,
+      irHit: body.irHit,
+      vibrationHit: body.vibrationHit,
+      mpuReady: body.mpuReady,
       action: body.action,
       eventType: body.eventType,
       value: body.value,

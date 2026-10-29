@@ -209,6 +209,68 @@ bool countDirty = false;
 
 uint32_t lastPostedCount = 0;
 
+// Admin can enable each sensor on its own to see which one counts.
+bool irEnabled = true;
+bool vibrationEnabled = true;
+bool irHitPending = false;
+bool vibrationHitPending = false;
+
+bool irSensorEnabled() {
+  portENTER_CRITICAL(&stateMux);
+  bool value = irEnabled;
+  portEXIT_CRITICAL(&stateMux);
+  return value;
+}
+
+bool vibrationSensorEnabled() {
+  portENTER_CRITICAL(&stateMux);
+  bool value = vibrationEnabled;
+  portEXIT_CRITICAL(&stateMux);
+  return value;
+}
+
+void setIrSensorEnabled(bool on) {
+  portENTER_CRITICAL(&stateMux);
+  irEnabled = on;
+  portEXIT_CRITICAL(&stateMux);
+  Serial.printf("[SENSOR] IR %s\n", on ? "ON" : "OFF");
+}
+
+void setVibrationSensorEnabled(bool on) {
+  portENTER_CRITICAL(&stateMux);
+  vibrationEnabled = on;
+  portEXIT_CRITICAL(&stateMux);
+  Serial.printf("[SENSOR] VIBRATION %s\n", on ? "ON" : "OFF");
+}
+
+void markIrHit() {
+  portENTER_CRITICAL(&stateMux);
+  irHitPending = true;
+  portEXIT_CRITICAL(&stateMux);
+}
+
+void markVibrationHit() {
+  portENTER_CRITICAL(&stateMux);
+  vibrationHitPending = true;
+  portEXIT_CRITICAL(&stateMux);
+}
+
+bool takeIrHit() {
+  portENTER_CRITICAL(&stateMux);
+  bool hit = irHitPending;
+  irHitPending = false;
+  portEXIT_CRITICAL(&stateMux);
+  return hit;
+}
+
+bool takeVibrationHit() {
+  portENTER_CRITICAL(&stateMux);
+  bool hit = vibrationHitPending;
+  vibrationHitPending = false;
+  portEXIT_CRITICAL(&stateMux);
+  return hit;
+}
+
 // =======================================
 // COUNTER SNAPSHOT
 // =======================================
@@ -377,16 +439,25 @@ void sendRadio(uint8_t command) {
 
   radioMsg.command = command;
 
-  esp_err_t result = esp_now_send(
-    receiverAddress,
-    (const uint8_t*)&radioMsg,
-    sizeof(radioMsg)
-  );
+  // One press must be enough. ESP-NOW drops frames while Wi-Fi is busy,
+  // so the same open/close command is repeated. Repeats are safe because
+  // command 2 and 3 set a state instead of toggling.
+  esp_err_t result = ESP_FAIL;
+  for (uint8_t attempt = 0; attempt < 4; attempt++) {
+    result = esp_now_send(
+      receiverAddress,
+      (const uint8_t*)&radioMsg,
+      sizeof(radioMsg)
+    );
+    if (attempt < 3) {
+      vTaskDelay(pdMS_TO_TICKS(40));
+    }
+  }
 
   xSemaphoreGive(radioMutex);
 
   Serial.printf(
-    "[ESP-NOW] Command %u: %s | channel %d | %s\n",
+    "[ESP-NOW] Command %u x4: %s | channel %d | %s\n",
     command,
     result == ESP_OK ? "QUEUED" : "SEND ERROR",
     WiFi.channel(),
@@ -492,6 +563,26 @@ void resetBallCounter() {
   digitalWrite(BUZZER_PIN, BUZZER_OFF);
 
   Serial.println("[COUNT] RESET 0/12");
+}
+
+// Always restarts at 0, even if a count is already running.
+void restartBallCounter() {
+
+  portENTER_CRITICAL(&stateMux);
+
+  ballCount = 0;
+  ballCounterActive = true;
+  forceAlarm = false;
+  alarmMuted = false;
+  lastBallProgressMs = millis();
+  counterGeneration++;
+  countDirty = true;
+
+  portEXIT_CRITICAL(&stateMux);
+
+  digitalWrite(BUZZER_PIN, BUZZER_OFF);
+
+  Serial.println("[COUNT] TEST START 0");
 }
 
 // =======================================
@@ -815,7 +906,12 @@ void handleApiJson(const String& response) {
     sendRadio(3);
 
   } else if (
-    strcmp(command, "START_BALL_COUNT") == 0 ||
+    strcmp(command, "START_BALL_COUNT") == 0
+  ) {
+
+    restartBallCounter();
+
+  } else if (
     strcmp(command, "TIME_EXPIRED") == 0
   ) {
 
@@ -825,6 +921,30 @@ void handleApiJson(const String& response) {
     Serial.println(
       "[SYSTEM] TIMER EXPIRED - COUNTING"
     );
+
+  } else if (
+    strcmp(command, "ENABLE_IR") == 0
+  ) {
+
+    setIrSensorEnabled(true);
+
+  } else if (
+    strcmp(command, "DISABLE_IR") == 0
+  ) {
+
+    setIrSensorEnabled(false);
+
+  } else if (
+    strcmp(command, "ENABLE_VIBRATION") == 0
+  ) {
+
+    setVibrationSensorEnabled(true);
+
+  } else if (
+    strcmp(command, "DISABLE_VIBRATION") == 0
+  ) {
+
+    setVibrationSensorEnabled(false);
 
   } else if (
     strcmp(command, "START_ALARM") == 0
@@ -909,7 +1029,7 @@ void enroll() {
   body += "\"name\":\"" +
     String(DEVICE_NAME) + "\",";
 
-  body += "\"firmwareVersion\":\"1.4.1\",";
+  body += "\"firmwareVersion\":\"1.4.3\",";
 
   body += "\"uptime\":" +
     String(millis() / 1000) + ",";
@@ -964,7 +1084,7 @@ void heartbeat() {
   body += "\"name\":\"" +
     String(DEVICE_NAME) + "\",";
 
-  body += "\"firmwareVersion\":\"1.4.1\",";
+  body += "\"firmwareVersion\":\"1.4.3\",";
 
   body += "\"uptime\":" +
     String(millis() / 1000) + ",";
@@ -984,7 +1104,27 @@ void heartbeat() {
     ",";
 
   body += "\"ballCount\":" +
-    String(s.count);
+    String(s.count) + ",";
+
+  bool irOn = irSensorEnabled();
+  bool vibrationOn = vibrationSensorEnabled();
+  bool irHit = takeIrHit();
+  bool vibrationHit = takeVibrationHit();
+
+  body += "\"irEnabled\":" +
+    String(irOn ? "true" : "false") + ",";
+
+  body += "\"vibrationEnabled\":" +
+    String(vibrationOn ? "true" : "false") + ",";
+
+  body += "\"irHit\":" +
+    String(irHit ? "true" : "false") + ",";
+
+  body += "\"vibrationHit\":" +
+    String(vibrationHit ? "true" : "false") + ",";
+
+  body += "\"mpuReady\":" +
+    String(mpuReady ? "true" : "false");
 
   body += "}";
 
@@ -1079,43 +1219,54 @@ void reportLatestCount() {
 
 void ButtonTask(void* parameter) {
 
-  bool last = HIGH;
-
+  bool reading = HIGH;
+  bool stable = HIGH;
+  uint32_t changedAt = 0;
   uint32_t lastPress = 0;
 
   while (true) {
 
     bool state = digitalRead(BUTTON_PIN);
+    uint32_t now = millis();
 
-    if (
-      last == HIGH &&
-      state == LOW &&
-      millis() - lastPress > 200
-    ) {
-
-      lastPress = millis();
-
-      bool nextDoor = !snapshotDoorOpen();
-
-      setDoorOpen(nextDoor);
-
-      Serial.printf(
-        "[BUTTON] %s\n",
-        nextDoor ? "OPEN" : "CLOSE"
-      );
-
-      sendRadio(1);
-
-      APIEvent event{1, 1};
-
-      xQueueSend(
-        apiQueue,
-        &event,
-        0
-      );
+    if (state != reading) {
+      reading = state;
+      changedAt = now;
     }
 
-    last = state;
+    // Accept the press only after it stays down, then ignore bounce.
+    if (
+      (uint32_t)(now - changedAt) >= 40 &&
+      reading != stable
+    ) {
+      stable = reading;
+
+      if (stable == LOW && (uint32_t)(now - lastPress) > 500) {
+
+        lastPress = now;
+
+        bool nextDoor = !snapshotDoorOpen();
+
+        setDoorOpen(nextDoor);
+
+        Serial.printf(
+          "[BUTTON] %s\n",
+          nextDoor ? "OPEN" : "CLOSE"
+        );
+
+        // 2 = open, 3 = close. Do not send toggle (1): a second
+        // bounce or a repeated frame would undo the close.
+        sendRadio(nextDoor ? 2 : 3);
+
+        APIEvent event{1, 1};
+
+        xQueueSend(
+          apiQueue,
+          &event,
+          0
+        );
+      }
+    }
 
     vTaskDelay(pdMS_TO_TICKS(10));
   }
@@ -1126,13 +1277,6 @@ void ButtonTask(void* parameter) {
 // =======================================
 
 void SensorTask(void* parameter) {
-
-  // This task is only created if mpuReady, but keep the guard for safety.
-  if (!mpuReady) {
-    Serial.println("[SENSOR] MPU6050 absent; IR+MPU ball counting unavailable");
-    vTaskDelete(NULL);
-    return;
-  }
 
   bool beamArmed = false;
 
@@ -1161,6 +1305,10 @@ void SensorTask(void* parameter) {
   // =====================================
   // MPU INITIAL CALIBRATION
   // =====================================
+
+  if (!mpuReady) {
+    Serial.println("[SENSOR] MPU6050 absent. IR can still be tested alone.");
+  } else {
 
   Serial.println(
     "[MPU] Calibrating..."
@@ -1193,6 +1341,8 @@ void SensorTask(void* parameter) {
     "[MPU] Calibration complete"
   );
 
+  }
+
   // =====================================
   // SENSOR MAIN LOOP
   // =====================================
@@ -1219,32 +1369,17 @@ void SensorTask(void* parameter) {
       previousImpactHigh = false;
     }
 
-    // ===================================
-    // COUNTER DISABLED OR COMPLETED
-    // ===================================
+    bool useIr = irSensorEnabled();
+    bool useMpu = vibrationSensorEnabled() && mpuReady;
+    bool counting = s.active && s.count < BALL_TARGET;
 
-    if (!s.active || s.count >= BALL_TARGET) {
+    // Both sensors off: do not emit IR or watch for vibration.
+    if (!useIr && !useMpu) {
 
       ledcWrite(IR_TX, 0);
-
       waitingForImpact = false;
 
-      if (mpu.getEvent(&a, &g, &temp)) {
-
-        baseX += BASELINE_ALPHA *
-          (a.acceleration.x - baseX);
-
-        baseY += BASELINE_ALPHA *
-          (a.acceleration.y - baseY);
-
-        baseZ += BASELINE_ALPHA *
-          (a.acceleration.z - baseZ);
-      }
-
-      previousImpactHigh = false;
-
       vTaskDelay(pdMS_TO_TICKS(20));
-
       continue;
     }
 
@@ -1252,8 +1387,11 @@ void SensorTask(void* parameter) {
     // READ MPU6050
     // ===================================
 
-    bool readingOK =
-      mpu.getEvent(&a, &g, &temp);
+    bool readingOK = false;
+
+    if (mpuReady) {
+      readingOK = mpu.getEvent(&a, &g, &temp);
+    }
 
     float impact = 0.0f;
 
@@ -1281,6 +1419,7 @@ void SensorTask(void* parameter) {
     // ===================================
 
     bool impactHigh =
+      useMpu &&
       readingOK &&
       impact >= IMPACT_THRESHOLD;
 
@@ -1290,11 +1429,27 @@ void SensorTask(void* parameter) {
 
     previousImpactHigh = impactHigh;
 
+    if (newImpact && useIr) {
+      markVibrationHit();
+    }
+
     // ===================================
     // READ IR SENSOR
     // ===================================
 
-    bool blocked = sampleBeamBlocked();
+    bool blocked = false;
+
+    if (!useIr) {
+
+      ledcWrite(IR_TX, 0);
+      beamArmed = false;
+      blockedSamples = 0;
+      clearSamples = 0;
+      waitingForImpact = false;
+
+    } else {
+
+    blocked = sampleBeamBlocked();
 
     if (blocked) {
 
@@ -1326,12 +1481,14 @@ void SensorTask(void* parameter) {
       }
     }
 
+    }
+
     // ===================================
     // IR DETECTED
-    // WAIT FOR MPU IMPACT
     // ===================================
 
     if (
+      useIr &&
       !waitingForImpact &&
       beamArmed &&
       blockedSamples >= BLOCKED_SAMPLES_REQUIRED &&
@@ -1342,19 +1499,53 @@ void SensorTask(void* parameter) {
       )
     ) {
 
-      waitingForImpact = true;
-
-      pendingSince = now;
-
       beamArmed = false;
+      markIrHit();
 
       Serial.println(
         "[IR] BEAM BLOCKED"
       );
 
-      Serial.println(
-        "[IR] Waiting for MPU impact..."
-      );
+      if (!useMpu) {
+
+        if (counting && confirmBall(seenGeneration)) {
+
+          lastBallAt = now;
+
+          Serial.println(
+            "[BALL] COUNTED BY IR"
+          );
+        }
+
+      } else {
+
+        waitingForImpact = true;
+        pendingSince = now;
+
+        Serial.println(
+          "[IR] Waiting for MPU impact..."
+        );
+      }
+    }
+
+    // Vibration alone counts when IR is switched off.
+    if (useMpu && !useIr && newImpact) {
+
+      markVibrationHit();
+
+      if (counting && confirmBall(seenGeneration)) {
+
+        lastBallAt = now;
+
+        Serial.printf(
+          "[MPU] IMPACT: %.2f m/s2\n",
+          impact
+        );
+
+        Serial.println(
+          "[BALL] COUNTED BY VIBRATION"
+        );
+      }
     }
 
     // ===================================
@@ -1377,8 +1568,10 @@ void SensorTask(void* parameter) {
 
       } else if (newImpact) {
 
+        markVibrationHit();
+
         // Both sensors confirmed
-        if (confirmBall(seenGeneration)) {
+        if (counting && confirmBall(seenGeneration)) {
 
           lastBallAt = now;
 
@@ -1497,8 +1690,10 @@ void APITask(void* parameter) {
     // HEARTBEAT
     // ===================================
 
+    // Poll faster while the door is open so CLOSE_BOX is not
+    // stuck behind the idle 4 second heartbeat.
     uint32_t heartbeatInterval =
-      s.active ? 1500UL : 4000UL;
+      (s.active || snapshotDoorOpen()) ? 1000UL : 4000UL;
 
     if (
       deviceSecret.length() &&
@@ -1773,7 +1968,7 @@ void setup() {
   Serial.println("================================");
   Serial.println(" SMART BILLIARD ESP32 SENDER");
   Serial.println(" IR + MPU6050 + BUZZER");
-  Serial.println(" Firmware 1.4.2 (WiFiManager-free)");
+  Serial.println(" Firmware 1.4.3 (WiFiManager-free)");
   Serial.println("================================");
 
   pinMode(BUTTON_PIN, INPUT_PULLUP);
@@ -1826,8 +2021,7 @@ void setup() {
   Serial.println("[BOOT 3/4] Checking optional MPU6050...");
   mpuReady = initializeMPU();
   if (!mpuReady) {
-    Serial.println("[MPU] SENSOR OFFLINE. Please fix wiring, then restart ESP32.");
-    Serial.println("[MPU] IR+MPU ball counting is DISABLED to avoid false counts.");
+    Serial.println("[MPU] SENSOR OFFLINE. IR can still be tested on its own.");
   }
 
   // 4) Create workers. Network and button still work when MPU is missing.
@@ -1841,9 +2035,7 @@ void setup() {
   }
 
   xTaskCreatePinnedToCore(ButtonTask, "ButtonTask", 4096, NULL, 3, NULL, 1);
-  if (mpuReady) {
-    xTaskCreatePinnedToCore(SensorTask, "SensorTask", 6144, NULL, 4, NULL, 1);
-  }
+  xTaskCreatePinnedToCore(SensorTask, "SensorTask", 6144, NULL, 4, NULL, 1);
   xTaskCreatePinnedToCore(AlarmTask, "AlarmTask", 3072, NULL, 2, NULL, 1);
   xTaskCreatePinnedToCore(APITask, "APITask", 16384, NULL, 1, NULL, 0);
   xTaskCreatePinnedToCore(WiFiTask, "WiFiTask", 4096, NULL, 1, NULL, 0);

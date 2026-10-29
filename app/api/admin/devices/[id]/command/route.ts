@@ -20,7 +20,21 @@ export async function POST(
     const admin = await requireUser(["ADMIN"]);
     const { id } = await params;
     const body = await readJson<{
-      action: "open" | "close" | "door-open" | "door-close" | "alarm-on" | "alarm-off" | "restart" | "simulate";
+      action:
+        | "open"
+        | "close"
+        | "door-open"
+        | "door-close"
+        | "alarm-on"
+        | "alarm-off"
+        | "restart"
+        | "simulate"
+        | "ir-on"
+        | "ir-off"
+        | "vibration-on"
+        | "vibration-off"
+        | "count-start"
+        | "count-stop";
       reason?: string;
       simulate?: string;
       balls?: number;
@@ -61,6 +75,55 @@ export async function POST(
         targetType: "Device",
         targetId: device.deviceId,
         reason: body.reason,
+      });
+    } else if (body.action === "ir-on" || body.action === "ir-off") {
+      const enabled = body.action === "ir-on";
+      device.irEnabled = enabled;
+      await device.save();
+      await queueCommand({
+        deviceId: device.deviceId,
+        command: enabled ? "ENABLE_IR" : "DISABLE_IR",
+      });
+      await writeAudit({
+        adminId: admin.id,
+        action: enabled ? "ENABLE_IR" : "DISABLE_IR",
+        targetType: "Device",
+        targetId: device.deviceId,
+      });
+    } else if (body.action === "vibration-on" || body.action === "vibration-off") {
+      const enabled = body.action === "vibration-on";
+      device.vibrationEnabled = enabled;
+      await device.save();
+      await queueCommand({
+        deviceId: device.deviceId,
+        command: enabled ? "ENABLE_VIBRATION" : "DISABLE_VIBRATION",
+      });
+      await writeAudit({
+        adminId: admin.id,
+        action: enabled ? "ENABLE_VIBRATION" : "DISABLE_VIBRATION",
+        targetType: "Device",
+        targetId: device.deviceId,
+      });
+    } else if (body.action === "count-start") {
+      device.sensorTestActive = true;
+      device.detectedBallCount = 0;
+      await device.save();
+      await queueCommand({ deviceId: device.deviceId, command: "START_BALL_COUNT" });
+      await writeAudit({
+        adminId: admin.id,
+        action: "START_SENSOR_TEST",
+        targetType: "Device",
+        targetId: device.deviceId,
+      });
+    } else if (body.action === "count-stop") {
+      device.sensorTestActive = false;
+      await device.save();
+      await queueCommand({ deviceId: device.deviceId, command: "STOP_BALL_COUNT" });
+      await writeAudit({
+        adminId: admin.id,
+        action: "STOP_SENSOR_TEST",
+        targetType: "Device",
+        targetId: device.deviceId,
       });
     } else if (body.action === "alarm-on") {
       await queueCommand({ deviceId: device.deviceId, command: "START_ALARM" });

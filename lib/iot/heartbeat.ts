@@ -15,6 +15,9 @@ export async function applyHeartbeat(input: {
   detectedBallCount?: number;
   ballCounterActive?: boolean;
   countEvent?: boolean;
+  irHit?: boolean;
+  vibrationHit?: boolean;
+  mpuReady?: boolean;
   alarmStatus?: boolean;
   firmwareVersion?: string;
   wifiRssi?: number;
@@ -41,12 +44,17 @@ export async function applyHeartbeat(input: {
     returning &&
     typeof input.detectedBallCount === "number" &&
     (input.ballCounterActive === true || input.countEvent === true);
-  if (playing) {
+  if (device.sensorTestActive && typeof input.detectedBallCount === "number") {
+    device.detectedBallCount = input.detectedBallCount;
+  } else if (playing) {
     device.detectedBallCount = 0;
   } else if (liveCount) {
     const incoming = input.detectedBallCount as number;
     device.detectedBallCount = Math.max(device.detectedBallCount || 0, incoming);
   }
+  if (input.irHit) device.lastIrAt = new Date();
+  if (input.vibrationHit) device.lastVibrationAt = new Date();
+  if (typeof input.mpuReady === "boolean") device.mpuReady = input.mpuReady;
   if (typeof input.alarmStatus === "boolean") device.alarmStatus = input.alarmStatus;
   if (input.firmwareVersion) device.firmwareVersion = input.firmwareVersion;
   if (typeof input.wifiRssi === "number") device.wifiRssi = input.wifiRssi;

@@ -26,6 +26,9 @@ export async function announceDevice(input: {
   boxStatus?: BoxStatus;
   ballCount?: number;
   ballCounterActive?: boolean;
+  irHit?: boolean;
+  vibrationHit?: boolean;
+  mpuReady?: boolean;
   action?: string;
   eventType?: number;
   value?: number;
@@ -103,6 +106,9 @@ export async function announceDevice(input: {
     detectedBallCount: detected,
     ballCounterActive: input.ballCounterActive,
     countEvent: input.action === "ball_detected",
+    irHit: input.irHit,
+    vibrationHit: input.vibrationHit,
+    mpuReady: input.mpuReady,
     firmwareVersion: input.firmwareVersion,
     wifiRssi: input.wifiRssi,
     uptime: input.uptime,

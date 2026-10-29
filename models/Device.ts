@@ -20,6 +20,12 @@ export interface DeviceDocument {
   uptime?: number;
   relayOpenDuration: number;
   alarmDelaySeconds: number;
+  irEnabled: boolean;
+  vibrationEnabled: boolean;
+  sensorTestActive: boolean;
+  mpuReady?: boolean;
+  lastIrAt?: Date;
+  lastVibrationAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -61,6 +67,12 @@ const DeviceSchema = new Schema<DeviceDocument>(
     uptime: Number,
     relayOpenDuration: { type: Number, default: 7000 },
     alarmDelaySeconds: { type: Number, default: 120 },
+    irEnabled: { type: Boolean, default: true },
+    vibrationEnabled: { type: Boolean, default: true },
+    sensorTestActive: { type: Boolean, default: false },
+    mpuReady: Boolean,
+    lastIrAt: Date,
+    lastVibrationAt: Date,
   },
   { timestamps: true }
 );
